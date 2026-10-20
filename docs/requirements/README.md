@@ -46,4 +46,5 @@ Rules:
 ## Related documents
 
 - Architecture: `docs/architecture/overview.md`
+- API reference: `docs/architecture/api.md`
 - Project overview: `README.md`
