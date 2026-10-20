@@ -1,6 +1,9 @@
-.vscode
+### VisualStudioCode ###
+.vscode/*
+!.vscode/tasks.json
 *.exe
 *.obj
 *.pdb
 *.ilk
 *.exp
+winfsp-x64.dll

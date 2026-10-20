@@ -1,0 +1,61 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "winfsp: copy runtime dll",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "$dir = (Get-ItemProperty 'HKLM:\\SOFTWARE\\WOW6432Node\\WinFsp' -ErrorAction SilentlyContinue).InstallDir; if (-not $dir) { $dir = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'WinFsp' }; $src = Join-Path $dir 'bin\\winfsp-x64.dll'; if (-not (Test-Path $src)) { Write-Error \"winfsp-x64.dll not found in '$dir' - install WinFsp x64 first\"; exit 1 }; Copy-Item $src '${workspaceFolder}\\isfs' -Force -ErrorAction Stop; Write-Host \"copied $src to ${workspaceFolder}\\isfs\""
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "type": "cppbuild",
+            "label": "C/C++: cl.exe build active file",
+            "command": "cl.exe",
+            "args": [
+                "/nologo",
+                "/Zi",
+                "/MT",
+                "/D_DEBUG",
+                "/D_CONSOLE",
+                "/DUNICODE",
+                "/D_UNICODE",
+                "/I${workspaceFolder}\\passthrough",
+                "/Fe${workspaceFolder}\\isfs\\${fileBasenameNoExtension}.exe",
+                "/Fo${workspaceFolder}\\isfs\\",
+                "/Fd${workspaceFolder}\\isfs\\",
+                "${file}",
+                "/link",
+                "${workspaceFolder}\\passthrough\\lib\\winfsp-x64.lib",
+                "advapi32.lib"
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "dependsOn": [
+                "winfsp: copy runtime dll"
+            ],
+            "problemMatcher": [
+                "$msCompile"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "WinFsp: passthrough\\winfsp (headers) + passthrough\\lib\\winfsp-x64.lib; winfsp-x64.dll is copied next to the exe"
+        }
+    ]
+}
