@@ -295,7 +295,7 @@ Explorer.
 
 All caches are in memory; the server is authoritative.
 
-- **Namespace cache** — result of `GET /%SYS/namespaces` (or the configured list), TTL 60 s.
+- **Namespace cache** — result of `GET /%SYS/namespaces`, TTL 60 s.
 - **Document descriptor cache** — per `(namespace, category)`: entries from
   `GetDocNames` (`name`, `cat`, `ts`, `db`, `gen`), TTL 30 s by default.
 - **Content cache** — keyed by `(namespace, document name, hash/ts)`, LRU with a configurable
@@ -321,8 +321,12 @@ entries.
 - The Atelier API exposes no client-side locks. Windows sharing modes are enforced locally
   by WinFsp; server-side locks from Studio/other clients appear as `423`/`425` and are
   reported as `STATUS_FILE_LOCK_CONFLICT`.
-- A failed `PUT` keeps the dirty buffer so the application can retry; cleanup of a handle
-  with unsaved data returns an error rather than silently discarding it.
+- A failed `PUT` leaves the handle's buffer dirty; nothing retries it in the background. On
+  close the remaining buffer goes out in one final `PUT`, and whatever is still not
+  acknowledged at that point is discarded without an error. Unmount never flushes: pending
+  changes are dropped silently, with no `PUT` and no error reported for the discarded data
+  (REQ-MOUNT-023). Only content acknowledged by a successful flush is guaranteed to be on the
+  server (REQ-MOUNT-024).
 - Long-running requests are bounded by connect/read timeouts; mounts fail fast if the
   server is unreachable.
 
@@ -330,12 +334,12 @@ entries.
 
 - Never log document content or secrets.
 - Log cache decisions (hit/miss/304/invalidate) at debug level.
-- Expose the effective configuration (server URL, namespace filter, read-only mode, TTLs,
-  cache limits) at startup.
+- Expose the effective configuration (server URL, read-only mode, TTLs, cache limits) at
+  startup.
 - Keep the Atelier request/response correlation in one log scope per filesystem operation,
   so a WinFsp callback can be traced end to end.
-- Mount failures (`401`, DNS, TLS, missing namespace) must produce an actionable message in
-  the mount dialog/service log.
+- Mount failures (`401`, DNS, TLS, timeout, unavailable `GET /%SYS/namespaces`) must produce
+  an actionable message in the mount dialog/service log.
 
 ## 11. Not mapped / out of scope
 
@@ -356,8 +360,10 @@ entries.
 
 These must be resolved and recorded as requirements before implementation:
 
-1. **Namespace discovery** — confirm `GET /%SYS/namespaces` on supported server versions;
-   define the fallback (configured list? error?).
+1. **Namespace discovery** — resolved in
+   [`mount-lifecycle.md`](../requirements/functional/mount-lifecycle.md) (REQ-MOUNT-013):
+   `GET /%SYS/namespaces` is the only source (no configured fallback list); an empty result
+   yields an empty volume, an unavailable endpoint fails the mount.
 2. **Path layout** — flat `\<ns>\<CAT>\<name>` (current proposal) vs nested package
    directories. Flat is lossless and simpler; nested is friendlier but needs an escaping
    scheme.
@@ -372,8 +378,9 @@ These must be resolved and recorded as requirements before implementation:
 8. **Generated/system documents** — default visibility and `hideSystemDocuments` defaults.
 9. **Rename across namespaces** — allow (download/upload) or restrict to the same
    namespace for v1.
-10. **Authentication** — Basic vs web session/token; credential storage (Windows Credential
-    Manager, config, environment); reconnect behavior.
+10. **Authentication** — resolved: the login and password are passed as the `-user` and
+    `-pass` parameters of `isfs.exe` and kept in memory only (REQ-MOUNT-010). How they are
+    presented to the server (Basic or web session) follows the deployment's scheme.
 11. **Read-only namespaces** — configuration list (for example `%SYS`) vs rely on `403`.
 12. **Volume size/free size** — synthetic constants vs configurable values.
 

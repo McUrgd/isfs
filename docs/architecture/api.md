@@ -206,8 +206,9 @@ Returns namespaces accessible to the current user.
 
 - Status: `200`, `500`.
 - **Route caveat:** the documented URL is `GET /api/atelier/v1/%25SYS/namespaces`, but the
-  exported `UrlMap` has no route for `GetNamespaces`. Verify on the target server; if it
-  is unavailable, the client needs a configured namespace list.
+  exported `UrlMap` has no route for `GetNamespaces`. Verify on the target server; if it is
+  unavailable, ISFS fails the mount instead of falling back to a configured list
+  (REQ-MOUNT-013 in `mount-lifecycle.md`).
 
 #### 8.1.2 `GET /:namespace`
 

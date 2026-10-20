@@ -11,7 +11,7 @@ retiring a requirement file.
 
 | Area | File | Status |
 |---|---|---|
-| Mount / attach lifecycle (drive letter, connect, disconnect, reconnect) | `functional/mount-lifecycle.md` | planned |
+| Mount / attach lifecycle (drive letter, connect, disconnect) | [`functional/mount-lifecycle.md`](functional/mount-lifecycle.md) | draft |
 | Filesystem operations (read, write, create, delete, rename, directory listing) | `functional/filesystem-operations.md` | planned |
 | Mapping of filesystem paths to Atelier resources (namespaces, documents, directories) | `functional/atelier-mapping.md` | planned |
 | Connection and authentication (server, credentials, session handling) | `functional/connection-auth.md` | planned |
