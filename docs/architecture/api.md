@@ -1,9 +1,9 @@
 # Atelier v1 API — Working Reference
 
-Status: reference derived from `docs/v1.xml` (export of `%Api.Atelier.v1`, generator
-version 25). The XML is the source of truth; this document reorganises it for day-to-day
-work on ISFS and records behaviours that are visible in the method implementations but
-missing from the route comments.
+Status: reference for `%Api.Atelier.v1` (generator version 25). The API implementation is
+the source of truth; this document reorganises it for day-to-day work on ISFS and records
+behaviours that are visible in the method implementations but missing from the route
+comments.
 
 The architecture that consumes this API is described in
 [`docs/architecture/overview.md`](overview.md).
@@ -28,8 +28,6 @@ All paths below are relative to the base URL.
 http://<host>:<web-port>/api/atelier/v1
 https://<host>:<web-port>/api/atelier/v1
 ```
-
-Examples in `docs/v1.xml` use `http://localhost:57772/api/atelier/v1`.
 
 - `%` in path segments is percent-encoded: namespace `%SYS` becomes `%25SYS`.
 - Document names are passed in the path after `/doc/`; the route is `(.*)`, so it
@@ -906,6 +904,5 @@ conversion, jobs, debugger, metadata) are control-plane APIs; see
 
 ## 14. Related documents
 
-- Raw API definition: `docs/v1.xml`
 - Architecture and filesystem mapping: `docs/architecture/overview.md`
 - Requirements index: `docs/requirements/README.md`

@@ -393,7 +393,6 @@ assigned when each area's first requirement is written.
 
 ## 14. Related documents
 
-- Raw API definition: `docs/v1.xml`
 - API reference for day-to-day work: `docs/architecture/api.md`
 - Requirements index: `docs/requirements/README.md`
 - Project overview and build instructions: `README.md`
