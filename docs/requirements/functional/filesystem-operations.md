@@ -62,7 +62,7 @@ Acceptance criteria:
   category; a document appears as a file or as a package level, according to the
   decomposition of its name (REQ-MAP-004, REQ-MAP-007).
 - The root listing is not part of this requirement: the contents of `\` are
-  defined by REQ-MOUNT-018.
+  defined by REQ-MAP-001 and REQ-MAP-002.
 - The listing is served from the descriptor cache where the cache is valid; the
   cache behaviour itself is defined in `caching.md`.
 

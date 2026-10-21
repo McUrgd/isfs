@@ -53,11 +53,11 @@ typedef struct
 {
     HANDLE Handle;
     PVOID DirBuffer;
-    BOOLEAN IsRoot; /* "\" is the namespace root, a synthetic directory (REQ-MOUNT-018) */
+    BOOLEAN IsRoot; /* "\" is the namespace root, a synthetic directory (REQ-MAP-001) */
 } PTFS_FILE_CONTEXT;
 
 /* the volume root is the -ns namespace: WinFsp passes "\" for it, possibly
- * with leading separators (REQ-MOUNT-018)
+ * with leading separators (REQ-MAP-001)
  */
 static BOOLEAN IsRootFileName(PCWSTR FileName)
 {
@@ -71,7 +71,7 @@ static BOOLEAN IsRootFileName(PCWSTR FileName)
 }
 
 /* synthetic directories have no local backing object, so their metadata is
- * generated instead of read from a handle (REQ-MOUNT-018)
+ * generated instead of read from a handle (REQ-MAP-001)
  */
 static NTSTATUS GetSyntheticDirInfo(FSP_FSCTL_FILE_INFO* FileInfo)
 {
@@ -517,7 +517,7 @@ static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* FileSystem,
     NTSTATUS Result;
 
     /* attributes are synthesized as well: nothing is read from the local
-     * file system (REQ-MOUNT-018)
+     * file system (REQ-MAP-001)
      */
     if (0 != PFileAttributes)
     {
@@ -559,7 +559,7 @@ static NTSTATUS Create(FSP_FILE_SYSTEM* FileSystem,
     ULONG CreateFlags;
     PTFS_FILE_CONTEXT* FileContext;
 
-    /* the namespace root already exists and cannot be created (REQ-MOUNT-018) */
+    /* the namespace root already exists and cannot be created (REQ-MAP-001) */
     if (IsRootFileName(FileName))
         return STATUS_OBJECT_NAME_COLLISION;
 
@@ -620,7 +620,7 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
     PTFS_FILE_CONTEXT* FileContext;
 
     /* the root is a synthetic directory backed by the -ns namespace, not by
-     * a local path (REQ-MOUNT-018)
+     * a local path (REQ-MAP-001)
      */
     if (IsRootFileName(FileName))
     {
@@ -710,7 +710,7 @@ static VOID Cleanup(FSP_FILE_SYSTEM* FileSystem,
     HANDLE Handle = HandleFromContext(FileContext);
 
     /* synthetic directories have no local handle and cannot be deleted
-     * (REQ-MOUNT-018)
+     * (REQ-MAP-001)
      */
     if (Context->IsRoot)
         return;
@@ -899,7 +899,7 @@ static NTSTATUS GetSecurity(FSP_FILE_SYSTEM* FileSystem,
     PSECURITY_DESCRIPTOR SecurityDescriptor, SIZE_T* PSecurityDescriptorSize)
 {
     /* every object exposes the same synthesized descriptor with full access;
-     * nothing is read from a local handle (REQ-MOUNT-018)
+     * nothing is read from a local handle (REQ-MAP-001)
      */
     return CopyFullAccessSecurityDescriptor(SecurityDescriptor, PSecurityDescriptorSize);
 }
@@ -943,9 +943,10 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM* FileSystem,
 
         if (FileContext->IsRoot)
         {
-            /* REQ-MOUNT-018: the root is the -ns namespace and lists only the
-             * synthetic category directories; documents and the namespace name
-             * itself are never root entries, and no local path is touched.
+            /* REQ-MAP-001, REQ-MAP-002: the root is the -ns namespace and lists
+             * only the synthetic category directories; documents and the
+             * namespace name itself are never root entries, and no local path is
+             * touched.
              */
             static PCWSTR Categories[] = { L"CLS", L"CSP", L"RTN", L"OTH" };
             ULONG Index;

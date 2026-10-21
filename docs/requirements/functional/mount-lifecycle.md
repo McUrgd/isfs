@@ -193,23 +193,6 @@ Acceptance criteria:
 - The mount result is `STATUS_LOGON_FAILURE` in the service log.
 - No volume is visible after the failure.
 
-### REQ-MOUNT-018 — Root directory contents
-
-Status: implemented
-
-The value of `-ns` is the `:namespace` of every Atelier request and the root of the mounted
-volume: `\` maps to `:namespace`, and the volume exposes only that one namespace. It is not a
-server-wide view and does not list namespaces.
-
-Acceptance criteria:
-- The root contains only the synthetic category directories of the `-ns` namespace
-  (`CLS`, `CSP`, `RTN`, `OTH`) and no files.
-- The namespace name itself is never an entry in the root; mounting `-ns USER` gives `\CLS\`,
-  not `\USER\CLS\`.
-- Requests issued while enumerating `\` target only the `-ns` namespace; no other namespace
-  is queried.
-- Document and category entries keep the server's canonical casing.
-
 ### REQ-MOUNT-019 — Case-insensitive path resolution
 
 Status: draft
@@ -307,10 +290,10 @@ Status: approved
 
 Once the mount has succeeded, the volume must be openable and browsable through normal
 Windows file access. What the volume contains and how names resolve is defined elsewhere
-(REQ-MOUNT-018, REQ-MOUNT-019, `atelier-mapping.md`, `filesystem-operations.md`).
+(REQ-MAP-001, REQ-MOUNT-019, `atelier-mapping.md`, `filesystem-operations.md`).
 
 Acceptance criteria:
-- `dir X:\` lists the root described by REQ-MOUNT-018 and completes without an error.
+- `dir X:\` lists the root described by REQ-MAP-001 and completes without an error.
 - Explorer opens `X:\` and browses at least one subdirectory without an error prompt.
 - A volume whose root cannot be opened is treated as a failed mount: it is not left
   mounted and the process exits with a non-zero status and a log message (REQ-MOUNT-021).

@@ -20,7 +20,8 @@ ISFS).
 
 > Current state: the repository contains the WinFsp passthrough skeleton
 > (`isfs/isfs.c`); the Atelier-backed volume source is not implemented yet. Every
-> requirement below is therefore `draft`.
+> requirement below is therefore `draft`, except REQ-MAP-001, which the current
+> build already satisfies.
 
 ## Path model
 
@@ -66,16 +67,22 @@ I:\
 
 ### REQ-MAP-001 — The volume root is the mounted namespace
 
-Status: draft
+Status: implemented
 
 The root of the mounted volume must be the namespace given by `-ns`, and the
-namespace must not appear in the tree of the volume.
+namespace must not appear in the tree of the volume. The volume exposes only
+that one namespace: it is not a server-wide view and does not list namespaces.
 
 Acceptance criteria:
 - The root `\` corresponds to `:namespace` in every Atelier URL.
 - No directory named after the namespace exists in the tree; `-ns USER` gives
   `\CLS\`, not `\USER\CLS\`.
-- No other namespace is queried or listed (REQ-MOUNT-018, REQ-CONN-003).
+- No other namespace is queried or listed (REQ-CONN-003).
+- The category entries of the root keep the server's canonical casing.
+
+> Merged: this requirement absorbed REQ-MOUNT-018 ("Root directory contents"),
+> which was retired from `mount-lifecycle.md` as its duplicate. The ID
+> REQ-MOUNT-018 is not reused.
 
 ### REQ-MAP-002 — The root contains only category directories
 
