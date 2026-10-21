@@ -24,6 +24,7 @@
 #include <strsafe.h>
 
 #define PROGNAME                        "isfs"
+#define VOLUME_NAME                     "ISFS"
 #define ALLOCATION_UNIT                 4096
 #define FULLPATH_SIZE                   (MAX_PATH + FSP_FSCTL_TRANSACT_PATH_SIZEMAX / sizeof(WCHAR))
 
@@ -85,6 +86,13 @@ static NTSTATUS GetVolumeInfo(FSP_FILE_SYSTEM* FileSystem,
 
     VolumeInfo->TotalSize = TotalSize.QuadPart;
     VolumeInfo->FreeSize = FreeSize.QuadPart;
+
+    /* the volume label does not depend on the server (REQ-MOUNT-006) */
+    memset(VolumeInfo->VolumeLabel, 0, sizeof VolumeInfo->VolumeLabel);
+    StringCchCopyW(VolumeInfo->VolumeLabel,
+        sizeof VolumeInfo->VolumeLabel / sizeof(WCHAR), L"" VOLUME_NAME);
+    VolumeInfo->VolumeLabelLength =
+        (UINT16)(wcslen(VolumeInfo->VolumeLabel) * sizeof(WCHAR));
 
     return STATUS_SUCCESS;
 }
@@ -699,7 +707,7 @@ static NTSTATUS PtfsCreate(PWSTR Path, PWSTR VolumePrefix, PWSTR MountPoint, UIN
     if (0 != VolumePrefix)
         wcscpy_s(VolumeParams.Prefix, sizeof VolumeParams.Prefix / sizeof(WCHAR), VolumePrefix);
     wcscpy_s(VolumeParams.FileSystemName, sizeof VolumeParams.FileSystemName / sizeof(WCHAR),
-        L"" PROGNAME);
+        L"" VOLUME_NAME);
 
     Result = FspFileSystemCreate(
         VolumeParams.Prefix[0] ? L"" FSP_FSCTL_NET_DEVICE_NAME : L"" FSP_FSCTL_DISK_DEVICE_NAME,
