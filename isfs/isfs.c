@@ -40,6 +40,8 @@ typedef struct
 {
     FSP_FILE_SYSTEM* FileSystem;
     PWSTR BaseUrl; /* http://host:port/api/atelier/v1 (REQ-MOUNT-009) */
+    PWSTR UserName; /* login from -user, memory only (REQ-MOUNT-010) */
+    PWSTR Password; /* password from -pass, memory only (REQ-MOUNT-010) */
 } PTFS;
 
 typedef struct
@@ -626,7 +628,8 @@ static FSP_FILE_SYSTEM_INTERFACE PtfsInterface =
 
 static VOID PtfsDelete(PTFS* Ptfs);
 
-static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR VolumePrefix, PWSTR MountPoint, UINT32 DebugFlags,
+static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR UserName, PWSTR Password,
+    PWSTR VolumePrefix, PWSTR MountPoint, UINT32 DebugFlags,
     PTFS** PPtfs)
 {
     FILETIME CreationTime;
@@ -655,6 +658,24 @@ static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR VolumePrefix, PWSTR MountPoint, 
         goto exit;
     }
     memcpy(Ptfs->BaseUrl, BaseUrl, Length);
+
+    Length = (wcslen(UserName) + 1) * sizeof(WCHAR);
+    Ptfs->UserName = malloc(Length);
+    if (0 == Ptfs->UserName)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+    memcpy(Ptfs->UserName, UserName, Length);
+
+    Length = (wcslen(Password) + 1) * sizeof(WCHAR);
+    Ptfs->Password = malloc(Length);
+    if (0 == Ptfs->Password)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+    memcpy(Ptfs->Password, Password, Length);
 
     GetSystemTimeAsFileTime(&CreationTime);
 
@@ -711,6 +732,16 @@ static VOID PtfsDelete(PTFS* Ptfs)
     if (0 != Ptfs->BaseUrl)
         free(Ptfs->BaseUrl);
 
+    if (0 != Ptfs->Password)
+    {
+        /* do not leave the password in freed memory (REQ-MOUNT-010) */
+        SecureZeroMemory(Ptfs->Password, wcslen(Ptfs->Password) * sizeof(WCHAR));
+        free(Ptfs->Password);
+    }
+
+    if (0 != Ptfs->UserName)
+        free(Ptfs->UserName);
+
     free(Ptfs);
 }
 
@@ -763,6 +794,8 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     ULONG DebugFlags = 0;
     PWSTR VolumePrefix = 0;
     PWSTR ServerAddress = 0;
+    PWSTR UserName = 0;
+    PWSTR Password = 0;
     PWSTR MountPoint = 0;
     HANDLE DebugLogHandle = INVALID_HANDLE_VALUE;
     WCHAR BaseUrlBuf[MAX_PATH];
@@ -773,6 +806,17 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     {
         if (L'-' != argp[0][0])
             break;
+        /* REQ-MOUNT-010: credentials are taken from -user and -pass only */
+        if (0 == wcscmp(argp[0], L"-user"))
+        {
+            argtos(UserName);
+            continue;
+        }
+        if (0 == wcscmp(argp[0], L"-pass"))
+        {
+            argtos(Password);
+            continue;
+        }
         switch (argp[0][1])
         {
         case L'?':
@@ -800,7 +844,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     if (arge > argp)
         goto usage;
 
-    if (0 == ServerAddress || 0 == MountPoint)
+    if (0 == ServerAddress || 0 == MountPoint || 0 == UserName || 0 == Password)
         goto usage;
 
     /* REQ-MOUNT-009: -p carries host:port only; the base URL is composed here */
@@ -832,7 +876,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         FspDebugLogSetHandle(DebugLogHandle);
     }
 
-    Result = PtfsCreate(BaseUrlBuf, VolumePrefix, MountPoint, DebugFlags, &Ptfs);
+    Result = PtfsCreate(BaseUrlBuf, UserName, Password, VolumePrefix, MountPoint, DebugFlags, &Ptfs);
     if (!NT_SUCCESS(Result))
     {
         fail(L"cannot create file system");
@@ -875,6 +919,8 @@ usage:
             "    -u \\Server\\Share    [UNC prefix (single backslash)]\n"
             "    -p Host:Port        [Atelier server address; base URL is http://Host:Port"
                 ATELIER_API_PATH "]\n"
+            "    -user Login         [Atelier login]\n"
+            "    -pass Password      [Atelier password; kept in memory only]\n"
             "    -m MountPoint       [X:|*|directory]\n";
 
         fail(usage, L"" PROGNAME);

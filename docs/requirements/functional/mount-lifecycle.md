@@ -110,7 +110,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-009 — Atelier server address is required
 
-Status: draft
+Status: implemented
 
 ISFS must require the address of the Atelier server, passed as the `-p host:port`
 parameter of `isfs.exe`. The parameter carries the host and the web port only; the base URL
@@ -131,7 +131,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-010 — Credentials come from launch parameters and are held in memory only
 
-Status: draft
+Status: implemented
 
 ISFS must take the login and the password from the `-user` and `-pass` parameters of
 `isfs.exe` and keep them in memory for the lifetime of the mount. They must never be written
