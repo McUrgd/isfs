@@ -1257,7 +1257,7 @@ usage:
             "    -ns Namespace       [Atelier namespace; becomes the volume root]\n"
             "    -user Login         [Atelier login]\n"
             "    -pass Password      [Atelier password; kept in memory only]\n"
-            "    -m MountPoint       [X:|*|directory]\n";
+            "    -m DriveLetter      [X: only; mounting on a directory is not supported]\n";
 
         fail(usage, L"" PROGNAME);
     }

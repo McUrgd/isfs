@@ -32,15 +32,20 @@ configuration surface (command line, config file, service parameters) is decided
 
 ### REQ-MOUNT-001 — The volume is served by the ISFS process
 
-Status: approved
+Status: implemented
 
 The mounted volume must be implemented inside the ISFS process (console host or WinFsp
 service); no separate helper process may be required to serve file operations.
 
 Acceptance criteria:
-- Starting ISFS with a valid configuration makes the volume usable without launching any
+- Starting ISFS with a valid configuration mounts the volume without launching any
   additional executable.
 - Terminating the ISFS process removes the volume.
+- No child or helper process is created to serve file operations: the volume is backed by
+  the ISFS process itself, plus the WinFsp driver and in-process `winfsp-x64.dll`.
+
+Whether the mounted volume can actually be opened and browsed is a separate requirement
+(REQ-MOUNT-029).
 
 ### REQ-MOUNT-002 — A mount point is mandatory
 
@@ -298,6 +303,25 @@ Status: dropped
 Exposing the volume as a network share (`\\Server\Share`) is intentionally unsupported for
 v1. Rationale: the requirement is a local Windows drive; a network volume adds share
 naming, access control, and gateway concerns with no v1 consumer.
+
+### REQ-MOUNT-029 — The mounted volume is usable
+
+Status: approved
+
+Once the mount has succeeded, the volume must be openable and browsable through normal
+Windows file access. What the volume contains and how names resolve is defined elsewhere
+(REQ-MOUNT-018, REQ-MOUNT-019, `atelier-mapping.md`, `filesystem-operations.md`).
+
+Acceptance criteria:
+- `dir X:\` lists the root described by REQ-MOUNT-018 and completes without an error.
+- Explorer opens `X:\` and browses at least one subdirectory without an error prompt.
+- A volume whose root cannot be opened is treated as a failed mount: it is not left
+  mounted and the process exits with a non-zero status and a log message (REQ-MOUNT-021).
+
+> Note: this requirement is what REQ-MOUNT-001 deliberately does not cover. The current
+> build satisfies only the process model of REQ-MOUNT-001: the volume source is the Atelier
+> mapping, which is not implemented yet, so the acceptance criteria above are verified
+> together with `atelier-mapping.md` and `filesystem-operations.md`.
 
 ## Open decisions affecting this area
 
