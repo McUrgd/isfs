@@ -457,15 +457,17 @@ static NTSTATUS SetVolumeLabel_(FSP_FILE_SYSTEM* FileSystem,
 }
 
 /* ISFS has no server-side ACL model: the descriptor is synthesized and never
- * read from or written to the server (overview §6). D:(A;;GA;;;WD) grants
+ * read from or written to the server (overview §6). "O:BAG:BAD:(A;;FA;;;WD)" grants
  * full access to everyone, which is the "full access" policy for the volume.
+ * 
+ * O:BAG:BA — owner and group (BUILTIN\Administrators), FA = FILE_ALL_ACCESS (0x1F01FF) instead if generic GA.
  */
 static PSECURITY_DESCRIPTOR BuildFullAccessSecurityDescriptor(VOID)
 {
     PSECURITY_DESCRIPTOR SecurityDescriptor = 0;
 
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &SecurityDescriptor, 0))
+        L"O:BAG:BAD:(A;;FA;;;WD)", SDDL_REVISION_1, &SecurityDescriptor, 0))
         return 0;
 
     return SecurityDescriptor;
