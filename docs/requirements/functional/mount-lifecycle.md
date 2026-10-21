@@ -164,10 +164,14 @@ Acceptance criteria:
 
 ### REQ-MOUNT-011 — Fail fast when the server is unreachable
 
-Status: draft
+Status: implemented
 
 Before exposing the volume, ISFS must probe the server, and a connection failure, DNS/TLS
 error, or timeout must abort the mount instead of mounting an unusable volume.
+
+The probe is `GET http://<host:port>/api/atelier/v1/%SYS/namespaces` performed with
+connect, send and receive timeouts of 30 s. It runs after the debug log is opened and before
+the volume is created, so the failure is visible in the service log or mount dialog.
 
 Acceptance criteria:
 - With the host unreachable, mount fails within the configured connect timeout.
@@ -176,10 +180,13 @@ Acceptance criteria:
 
 ### REQ-MOUNT-012 — Mount authentication failure
 
-Status: draft
+Status: implemented
 
 When the server rejects the credentials during mount, ISFS must fail the mount and report a
 logon failure rather than expose the volume.
+
+The probe authenticates with HTTP Basic: the `Authorization` header is built from
+`-user`/`-pass` in UTF-8 for the duration of the request only and is wiped afterwards.
 
 Acceptance criteria:
 - A `401` response during the mount probe aborts the mount with a message naming the
@@ -333,6 +340,9 @@ the values are not configurable (REQ-MOUNT-008).
 
 Resolved: the Atelier server address is passed as `-p <host:port>`; ISFS composes
 `http://<host:port>/api/atelier/v1` from it (REQ-MOUNT-009). TLS selection is still open.
+
+Resolved: the mount probe is `GET /%SYS/namespaces` with HTTP Basic credentials, and both an
+unreachable server and `401` abort the mount (REQ-MOUNT-011, REQ-MOUNT-012).
 
 Resolved: namespace discovery has no fallback. When `GET /%SYS/namespaces` is unavailable,
 the mount fails with an actionable error and no volume remains (REQ-MOUNT-013).

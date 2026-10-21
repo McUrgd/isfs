@@ -40,7 +40,8 @@
                 "${file}",
                 "/link",
                 "${workspaceFolder}\\passthrough\\lib\\winfsp-x64.lib",
-                "advapi32.lib"
+                "advapi32.lib",
+                "winhttp.lib"
             ],
             "options": {
                 "cwd": "${fileDirname}"
@@ -55,7 +56,7 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "detail": "WinFsp: passthrough\\winfsp (headers) + passthrough\\lib\\winfsp-x64.lib; winfsp-x64.dll is copied next to the exe"
+            "detail": "WinFsp: passthrough\\winfsp (headers) + passthrough\\lib\\winfsp-x64.lib + winhttp.lib; winfsp-x64.dll is copied next to the exe"
         }
     ]
 }

@@ -22,10 +22,15 @@
 
 #include <winfsp/winfsp.h>
 #include <strsafe.h>
+#include <winhttp.h>
 
 #define PROGNAME                        "isfs"
 #define VOLUME_NAME                     "ISFS"
 #define ATELIER_API_PATH                "/api/atelier/v1"
+/* mount probe: GET /%SYS/namespaces, percent-encoded as %25SYS (REQ-MOUNT-011) */
+#define ATELIER_NAMESPACES_PATH         "/%25SYS/namespaces"
+/* connect/send/receive timeout for the mount probe (REQ-MOUNT-011) */
+#define ATELIER_TIMEOUT_MS              30000
 #define ALLOCATION_UNIT                 4096
 #define FULLPATH_SIZE                   (MAX_PATH + FSP_FSCTL_TRANSACT_PATH_SIZEMAX / sizeof(WCHAR))
 
@@ -49,6 +54,295 @@ typedef struct
     HANDLE Handle;
     PVOID DirBuffer;
 } PTFS_FILE_CONTEXT;
+
+/* base64 is needed for the HTTP Basic header; Windows has no plain base64 API
+ * that does not pull in crypt32, so encode in place
+ */
+static BOOL Base64EncodeWide(const BYTE* Data, DWORD DataSize, PWSTR Buffer, DWORD BufferCch)
+{
+    static const WCHAR Alphabet[] =
+        L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    DWORD Index, Out = 0, Remaining;
+
+    if ((DataSize + 2) / 3 * 4 + 1 > BufferCch)
+        return FALSE;
+
+    for (Index = 0; Index + 3 <= DataSize; Index += 3)
+    {
+        Buffer[Out++] = Alphabet[Data[Index] >> 2];
+        Buffer[Out++] = Alphabet[((Data[Index] & 0x03) << 4) | (Data[Index + 1] >> 4)];
+        Buffer[Out++] = Alphabet[((Data[Index + 1] & 0x0f) << 2) | (Data[Index + 2] >> 6)];
+        Buffer[Out++] = Alphabet[Data[Index + 2] & 0x3f];
+    }
+
+    Remaining = DataSize - Index;
+    if (1 == Remaining)
+    {
+        Buffer[Out++] = Alphabet[Data[Index] >> 2];
+        Buffer[Out++] = Alphabet[(Data[Index] & 0x03) << 4];
+        Buffer[Out++] = L'=';
+        Buffer[Out++] = L'=';
+    }
+    else if (2 == Remaining)
+    {
+        Buffer[Out++] = Alphabet[Data[Index] >> 2];
+        Buffer[Out++] = Alphabet[((Data[Index] & 0x03) << 4) | (Data[Index + 1] >> 4)];
+        Buffer[Out++] = Alphabet[(Data[Index + 1] & 0x0f) << 2];
+        Buffer[Out++] = L'=';
+    }
+
+    Buffer[Out] = L'\0';
+
+    return TRUE;
+}
+
+/* builds "Authorization: Basic ..." from the -user/-pass credentials; the caller
+ * must wipe and free the returned string (REQ-MOUNT-010)
+ */
+static PWSTR BasicAuthHeader(PCWSTR UserName, PCWSTR Password)
+{
+    SIZE_T CredentialsCch = wcslen(UserName) + 1 + wcslen(Password);
+    PWSTR Credentials = 0;
+    PWSTR Header = 0;
+    PWSTR Encoded = 0;
+    BYTE* Utf8 = 0;
+    int Utf8Size = 0;
+    SIZE_T EncodedCch, HeaderCch;
+
+    Credentials = malloc((CredentialsCch + 1) * sizeof(WCHAR));
+    if (0 == Credentials)
+        goto exit;
+    if (FAILED(StringCchPrintfW(Credentials, CredentialsCch + 1, L"%s:%s", UserName, Password)))
+        goto exit;
+
+    Utf8Size = WideCharToMultiByte(CP_UTF8, 0, Credentials, (int)CredentialsCch, 0, 0, 0, 0);
+    Utf8 = malloc((SIZE_T)Utf8Size);
+    if (0 == Utf8 || 0 == Utf8Size)
+        goto exit;
+    WideCharToMultiByte(CP_UTF8, 0, Credentials, (int)CredentialsCch,
+        (LPSTR)Utf8, Utf8Size, 0, 0);
+
+    EncodedCch = ((SIZE_T)Utf8Size + 2) / 3 * 4 + 1;
+    Encoded = malloc(EncodedCch * sizeof(WCHAR));
+    if (0 == Encoded || !Base64EncodeWide(Utf8, (DWORD)Utf8Size, Encoded, (DWORD)EncodedCch))
+        goto exit;
+
+    /* "Authorization: Basic " */
+    HeaderCch = 21 + EncodedCch;
+    Header = malloc(HeaderCch * sizeof(WCHAR));
+    if (0 == Header)
+        goto exit;
+    if (FAILED(StringCchPrintfW(Header, HeaderCch, L"Authorization: Basic %s", Encoded)))
+    {
+        free(Header);
+        Header = 0;
+    }
+
+exit:
+    if (0 != Encoded)
+    {
+        /* EncodedCch includes the terminator and is set before the allocation */
+        SecureZeroMemory(Encoded, EncodedCch * sizeof(WCHAR));
+        free(Encoded);
+    }
+    if (0 != Utf8)
+    {
+        SecureZeroMemory(Utf8, (SIZE_T)Utf8Size);
+        free(Utf8);
+    }
+    if (0 != Credentials)
+    {
+        SecureZeroMemory(Credentials, CredentialsCch * sizeof(WCHAR));
+        free(Credentials);
+    }
+
+    return Header;
+}
+
+static NTSTATUS AtelierTransportError(PCWSTR Endpoint, DWORD Error)
+{
+    PCWSTR Reason;
+    NTSTATUS Result;
+
+    switch (Error)
+    {
+    case ERROR_WINHTTP_TIMEOUT:
+        Reason = L"timed out";
+        Result = STATUS_IO_TIMEOUT;
+        break;
+    case ERROR_WINHTTP_NAME_NOT_RESOLVED:
+        Reason = L"host name could not be resolved";
+        Result = STATUS_NETWORK_UNREACHABLE;
+        break;
+    case ERROR_WINHTTP_CANNOT_CONNECT:
+        Reason = L"connection refused or host unreachable";
+        Result = STATUS_NETWORK_UNREACHABLE;
+        break;
+    case ERROR_WINHTTP_SECURE_FAILURE:
+        Reason = L"TLS negotiation failed";
+        Result = STATUS_INVALID_NETWORK_RESPONSE;
+        break;
+    default:
+        Reason = L"HTTP transport error";
+        Result = STATUS_NETWORK_UNREACHABLE;
+        break;
+    }
+
+    fail(L"cannot connect to %s: %s (WinHTTP error %lu)", Endpoint, Reason, Error);
+
+    return Result;
+}
+
+/* mount-time probe: GET /%SYS/namespaces against -p host:port.
+ * Fails the mount when the server is unreachable (REQ-MOUNT-011) or rejects the
+ * credentials (REQ-MOUNT-012). The password is only used in the Basic header and
+ * never logged (REQ-MOUNT-010).
+ */
+static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
+{
+    WCHAR HostName[256];
+    WCHAR BasePath[1024];
+    WCHAR RequestPath[1100];
+    WCHAR DisplayUrl[1300];
+    URL_COMPONENTS UrlComponents;
+    HINTERNET Session = 0, Connection = 0, Request = 0;
+    PWSTR AuthHeader = 0;
+    DWORD StatusCode = 0, Size;
+    NTSTATUS Result;
+
+    memset(&UrlComponents, 0, sizeof UrlComponents);
+    UrlComponents.dwStructSize = sizeof UrlComponents;
+    UrlComponents.lpszHostName = HostName;
+    UrlComponents.dwHostNameLength = ARRAYSIZE(HostName);
+    UrlComponents.lpszUrlPath = BasePath;
+    UrlComponents.dwUrlPathLength = ARRAYSIZE(BasePath);
+
+    if (!WinHttpCrackUrl(BaseUrl, 0, 0, &UrlComponents))
+    {
+        fail(L"cannot connect to %s: invalid server address (WinHTTP error %lu)",
+            BaseUrl, GetLastError());
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* copy the path literally: the percent in %25SYS must not be treated as a
+     * printf conversion (it is already percent-encoded for the URL)
+     */
+    if (FAILED(StringCchCopyW(RequestPath, ARRAYSIZE(RequestPath), BasePath)) ||
+        FAILED(StringCchCatW(RequestPath, ARRAYSIZE(RequestPath),
+            L"" ATELIER_NAMESPACES_PATH)) ||
+        FAILED(StringCchPrintfW(DisplayUrl, ARRAYSIZE(DisplayUrl),
+            L"%s/%%SYS/namespaces", BaseUrl)))
+    {
+        fail(L"cannot connect to %s: endpoint URL is too long", BaseUrl);
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    /* connect to host:port directly, without a proxy */
+    Session = WinHttpOpen(L"" PROGNAME L"/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (0 == Session)
+    {
+        fail(L"cannot connect to %s: cannot initialize HTTP client (Win32 error %lu)",
+            DisplayUrl, GetLastError());
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    /* failure to set a timeout is not fatal, the defaults apply */
+    WinHttpSetTimeouts(Session, ATELIER_TIMEOUT_MS, ATELIER_TIMEOUT_MS,
+        ATELIER_TIMEOUT_MS, ATELIER_TIMEOUT_MS);
+
+    Connection = WinHttpConnect(Session, HostName, UrlComponents.nPort, 0);
+    if (0 == Connection)
+    {
+        Result = AtelierTransportError(DisplayUrl, GetLastError());
+        goto exit;
+    }
+
+    Request = WinHttpOpenRequest(Connection, L"GET", RequestPath, 0,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        INTERNET_SCHEME_HTTPS == UrlComponents.nScheme ? WINHTTP_FLAG_SECURE : 0);
+    if (0 == Request)
+    {
+        Result = AtelierTransportError(DisplayUrl, GetLastError());
+        goto exit;
+    }
+
+    AuthHeader = BasicAuthHeader(UserName, Password);
+    if (0 == AuthHeader)
+    {
+        fail(L"cannot connect to %s: cannot build credentials", DisplayUrl);
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    if (!WinHttpAddRequestHeaders(Request, AuthHeader, (DWORD)-1,
+        WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE) ||
+        !WinHttpSendRequest(Request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(Request, 0))
+    {
+        Result = AtelierTransportError(DisplayUrl, GetLastError());
+        goto exit;
+    }
+
+    Size = sizeof StatusCode;
+    if (!WinHttpQueryHeaders(Request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &StatusCode, &Size, WINHTTP_NO_HEADER_INDEX))
+    {
+        Result = AtelierTransportError(DisplayUrl, GetLastError());
+        goto exit;
+    }
+
+    if (StatusCode >= 200 && StatusCode < 300)
+    {
+        info(L"connected to Atelier server at %s (HTTP %lu)", DisplayUrl, StatusCode);
+        Result = STATUS_SUCCESS;
+    }
+    else if (401 == StatusCode)
+    {
+        fail(L"cannot connect to %s: authentication failed (HTTP 401); "
+            L"check -user and -pass", DisplayUrl);
+        Result = STATUS_LOGON_FAILURE;
+    }
+    else if (403 == StatusCode)
+    {
+        fail(L"cannot connect to %s: access denied (HTTP 403); "
+            L"the account may not use the Atelier API", DisplayUrl);
+        Result = STATUS_ACCESS_DENIED;
+    }
+    else if (404 == StatusCode)
+    {
+        fail(L"cannot connect to %s: endpoint not found (HTTP 404); "
+            L"the Atelier API is not available on this server", DisplayUrl);
+        Result = STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    else if (StatusCode >= 500)
+    {
+        fail(L"cannot connect to %s: server error (HTTP %lu)", DisplayUrl, StatusCode);
+        Result = STATUS_UNEXPECTED_IO_ERROR;
+    }
+    else
+    {
+        fail(L"cannot connect to %s: unexpected response (HTTP %lu)", DisplayUrl, StatusCode);
+        Result = STATUS_UNSUCCESSFUL;
+    }
+
+exit:
+    if (0 != AuthHeader)
+    {
+        SecureZeroMemory(AuthHeader, wcslen(AuthHeader) * sizeof(WCHAR));
+        free(AuthHeader);
+    }
+    if (0 != Request)
+        WinHttpCloseHandle(Request);
+    if (0 != Connection)
+        WinHttpCloseHandle(Connection);
+    if (0 != Session)
+        WinHttpCloseHandle(Session);
+
+    return Result;
+}
 
 static NTSTATUS GetFileInfoInternal(HANDLE Handle, FSP_FSCTL_FILE_INFO* FileInfo)
 {
@@ -874,6 +1168,16 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         }
 
         FspDebugLogSetHandle(DebugLogHandle);
+    }
+
+    /* probe the server before exposing the volume: an unreachable server or
+     * rejected credentials must abort the mount (REQ-MOUNT-011, REQ-MOUNT-012)
+     */
+    Result = AtelierProbe(BaseUrlBuf, UserName, Password);
+    if (!NT_SUCCESS(Result))
+    {
+        fail(L"mount of %s aborted: Atelier server is not usable", MountPoint);
+        goto exit;
     }
 
     Result = PtfsCreate(BaseUrlBuf, UserName, Password, VolumePrefix, MountPoint, DebugFlags, &Ptfs);

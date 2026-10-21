@@ -379,8 +379,9 @@ These must be resolved and recorded as requirements before implementation:
 9. **Rename across namespaces** — allow (download/upload) or restrict to the same
    namespace for v1.
 10. **Authentication** — resolved: the login and password are passed as the `-user` and
-    `-pass` parameters of `isfs.exe` and kept in memory only (REQ-MOUNT-010). How they are
-    presented to the server (Basic or web session) follows the deployment's scheme.
+    `-pass` parameters of `isfs.exe` and kept in memory only (REQ-MOUNT-010). The mount
+    probe presents them as HTTP Basic to `GET /%SYS/namespaces`; a web-session scheme is not
+    used in v1 (REQ-MOUNT-011, REQ-MOUNT-012).
 11. **Read-only namespaces** — configuration list (for example `%SYS`) vs rely on `403`.
 12. **Volume size/free size** — resolved: `TotalSize` and `FreeSize` are both 0 ("size
     unknown") and are not configurable

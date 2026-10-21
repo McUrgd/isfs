@@ -160,57 +160,38 @@ usually match. Treat the header as opaque.
 
 | # | Method and path | Call | Purpose |
 |---|---|---|---|
-| 1 | `GET /%SYS/namespaces` | `GetNamespaces` | list accessible namespaces (route not in the exported `UrlMap`) |
-| 2 | `GET /:namespace` | `GetNamespace` | namespace info: databases, features |
-| 3 | `GET /%SYS/cspapps` | `GetCSPApps` | list CSP applications (all namespaces) |
-| 4 | `GET /%SYS/cspapps/:namespace` | `GetCSPApps` | list CSP applications for one namespace |
-| 5 | `GET /:namespace/docnames` | `GetDocNames` | list all documents |
-| 6 | `GET /:namespace/docnames/:cat` | `GetDocNames` | list documents by category |
-| 7 | `GET /:namespace/docnames/:cat/:type` | `GetDocNames` | list documents by category and type(s) |
-| 8 | `POST /:namespace/modified/:type` | `GetModifiedDocNames` | changed documents by database hash |
-| 9 | `GET /:namespace/doc/(.*)` | `GetDoc` | read one document |
-| 10 | `HEAD /:namespace/doc/(.*)` | `HeadDoc` | document hash/timestamp |
-| 11 | `PUT /:namespace/doc/(.*)` | `PutDoc` | create or replace a document |
-| 12 | `DELETE /:namespace/doc/(.*)` | `DeleteDoc` | delete one document |
-| 13 | `POST /:namespace/docs` | `GetDocs` | batch read |
-| 14 | `DELETE /:namespace/docs` | `DeleteDocs` | batch delete |
-| 15 | `POST /:namespace/action/compile` | `Compile` | compile one or more documents |
-| 16 | `POST /:namespace/action/index` | `Index` | retrieve document index/metadata |
-| 17 | `POST /:namespace/action/query` | `Query` | run SQL |
-| 18 | `POST /:namespace/work` | `QueueAsync` | queue asynchronous work |
-| 19 | `GET /:namespace/work/:id` | `PollAsync` | poll queued work |
-| 20 | `DELETE /:namespace/work/:id` | `CancelAsync` | cancel queued work |
-| 21 | `GET /:namespace/ens/classes/:type` | `GetEnsClassType` | Ensemble class names by type |
-| 22 | `GET /:namespace/ens/adapter/:name` | `GetAdpInputOutputClass` | adapter input/output classes |
-| 23 | `POST /:namespace/cvt/doc/xml` | `CvtClientDocToXml` | legacy: text → XML (deprecated) |
-| 24 | `POST /:namespace/cvt/xml/doc` | `CvtXmlToClientDoc` | legacy: XML → documents (deprecated) |
-| 25 | `GET /%SYS/metadata/:database` | `GetMetaData` | Atelier metadata ZIP |
-| 26 | `GET /%SYS/jobs` | `GetJobs` | running jobs |
-| 27 | `GET /%SYS/debug` | `RunDebugger` | debugger landing page |
+| 1 | `GET /:namespace` | `GetNamespace` | namespace info: databases, features |
+| 2 | `GET /%SYS/cspapps` | `GetCSPApps` | list CSP applications (all namespaces) |
+| 3 | `GET /%SYS/cspapps/:namespace` | `GetCSPApps` | list CSP applications for one namespace |
+| 4 | `GET /:namespace/docnames` | `GetDocNames` | list all documents |
+| 5 | `GET /:namespace/docnames/:cat` | `GetDocNames` | list documents by category |
+| 6 | `GET /:namespace/docnames/:cat/:type` | `GetDocNames` | list documents by category and type(s) |
+| 7 | `POST /:namespace/modified/:type` | `GetModifiedDocNames` | changed documents by database hash |
+| 8 | `GET /:namespace/doc/(.*)` | `GetDoc` | read one document |
+| 9 | `HEAD /:namespace/doc/(.*)` | `HeadDoc` | document hash/timestamp |
+| 10 | `PUT /:namespace/doc/(.*)` | `PutDoc` | create or replace a document |
+| 11 | `DELETE /:namespace/doc/(.*)` | `DeleteDoc` | delete one document |
+| 12 | `POST /:namespace/docs` | `GetDocs` | batch read |
+| 13 | `DELETE /:namespace/docs` | `DeleteDocs` | batch delete |
+| 14 | `POST /:namespace/action/compile` | `Compile` | compile one or more documents |
+| 15 | `POST /:namespace/action/index` | `Index` | retrieve document index/metadata |
+| 16 | `POST /:namespace/action/query` | `Query` | run SQL |
+| 17 | `POST /:namespace/work` | `QueueAsync` | queue asynchronous work |
+| 18 | `GET /:namespace/work/:id` | `PollAsync` | poll queued work |
+| 19 | `DELETE /:namespace/work/:id` | `CancelAsync` | cancel queued work |
+| 20 | `GET /:namespace/ens/classes/:type` | `GetEnsClassType` | Ensemble class names by type |
+| 21 | `GET /:namespace/ens/adapter/:name` | `GetAdpInputOutputClass` | adapter input/output classes |
+| 22 | `POST /:namespace/cvt/doc/xml` | `CvtClientDocToXml` | legacy: text → XML (deprecated) |
+| 23 | `POST /:namespace/cvt/xml/doc` | `CvtXmlToClientDoc` | legacy: XML → documents (deprecated) |
+| 24 | `GET /%SYS/metadata/:database` | `GetMetaData` | Atelier metadata ZIP |
+| 25 | `GET /%SYS/jobs` | `GetJobs` | running jobs |
+| 26 | `GET /%SYS/debug` | `RunDebugger` | debugger landing page |
 
 ## 8. Endpoint reference
 
 ### 8.1 Server and namespaces
 
-#### 8.1.1 `GET /%SYS/namespaces`
-
-Returns namespaces accessible to the current user.
-
-```json
-{
-  "status": { "errors": [], "summary": "" },
-  "console": [],
-  "result": { "content": ["%SYS", "DOCBOOK", "SAMPLES", "USER"] }
-}
-```
-
-- Status: `200`, `500`.
-- **Route caveat:** the documented URL is `GET /api/atelier/v1/%25SYS/namespaces`, but the
-  exported `UrlMap` has no route for `GetNamespaces`. Verify on the target server; if it is
-  unavailable, ISFS fails the mount instead of falling back to a configured list
-  (REQ-MOUNT-013 in `mount-lifecycle.md`).
-
-#### 8.1.2 `GET /:namespace`
+#### 8.1.1 `GET /:namespace`
 
 Returns database mappings and feature flags for a namespace.
 
@@ -239,7 +220,7 @@ Returns database mappings and feature flags for a namespace.
 - `db[].crhash` is the database change hash used by `GetModifiedDocNames`.
 - `features[].name = ENSEMBLE` indicates an Ensemble-enabled namespace.
 
-#### 8.1.3 `GET /%SYS/cspapps` and `GET /%SYS/cspapps/:namespace`
+#### 8.1.2 `GET /%SYS/cspapps` and `GET /%SYS/cspapps/:namespace`
 
 Lists CSP applications. Without a namespace, all accessible namespaces are scanned;
 an invalid namespace yields an empty list rather than `404`.
@@ -870,20 +851,19 @@ produced the export, and verify against a live server when in doubt.
 |---|---|---|
 | 1 | `PUT /doc/...` content type | Description says `text/plain`; implementation requires `application/json`. |
 | 2 | `PUT` lock status | Description says `425`; implementation returns `423`. Handle both. |
-| 3 | `GetNamespaces` route | Documented URL `GET /%SYS/namespaces` is absent from `UrlMap`. |
-| 4 | `GetDocNames` `upd` field | Returned by the implementation but not shown in the XML example. |
-| 5 | `GetModifiedDocNames` response | Description shows a bare array; implementation builds a document collection. |
-| 6 | `GetDocs` bad body | Implementation returns `400`; description lists only `415`/`500`. |
-| 7 | `Index` bad JSON | Implementation returns `400`; description lists only `415`/`500`. |
-| 8 | Async `Location` header | Implementation sets the bare numeric ID, not a URL. |
-| 9 | Async `410` | Documented for purged results; implementation returns `404`. |
-| 10 | `CvtClientDocToXml` content type | Description says JSON; implementation requires `text/plain`. |
-| 11 | `DeleteDocs` result shape | Array directly in `result`, unlike other collections. |
-| 12 | CSP `app` filter | Not mentioned in the main description; used by `GetDocNames`. |
-| 13 | `GetCSPApps` invalid namespace | Returns an empty list, not `404`. |
-| 14 | Compile on locked document | Description mentions `423`/`404`; the actual per-document outcome may be a `200` with a document `status`. |
-| 15 | `GetDoc` ETag | Requires `If-None-Match`; response uses `ETag` (helper methods are inherited, not in this export). |
-| 16 | Source-control hooks | Can alter content on `GET`/`PUT`; `console` carries their output. |
+| 3 | `GetDocNames` `upd` field | Returned by the implementation but not shown in the XML example. |
+| 4 | `GetModifiedDocNames` response | Description shows a bare array; implementation builds a document collection. |
+| 5 | `GetDocs` bad body | Implementation returns `400`; description lists only `415`/`500`. |
+| 6 | `Index` bad JSON | Implementation returns `400`; description lists only `415`/`500`. |
+| 7 | Async `Location` header | Implementation sets the bare numeric ID, not a URL. |
+| 8 | Async `410` | Documented for purged results; implementation returns `404`. |
+| 9 | `CvtClientDocToXml` content type | Description says JSON; implementation requires `text/plain`. |
+| 10 | `DeleteDocs` result shape | Array directly in `result`, unlike other collections. |
+| 11 | CSP `app` filter | Not mentioned in the main description; used by `GetDocNames`. |
+| 12 | `GetCSPApps` invalid namespace | Returns an empty list, not `404`. |
+| 13 | Compile on locked document | Description mentions `423`/`404`; the actual per-document outcome may be a `200` with a document `status`. |
+| 14 | `GetDoc` ETag | Requires `If-None-Match`; response uses `ETag` (helper methods are inherited, not in this export). |
+| 15 | Source-control hooks | Can alter content on `GET`/`PUT`; `console` carries their output. |
 
 ## 13. Usage in ISFS
 
@@ -891,8 +871,8 @@ For the filesystem mapping, the essential subset is:
 
 | ISFS operation | Endpoint(s) |
 |---|---|
-| Mount/probe | `GET /%SYS/namespaces`, `GET /:namespace` |
-| Root/namespace/category listing | `GET /%SYS/namespaces`, `GET /:namespace/docnames[/:cat[/:type]]` |
+| Mount/probe | `GET /:namespace` |
+| Root/namespace/category listing | `GET /:namespace/docnames[/:cat[/:type]]` |
 | Stat / hash | `HEAD /:namespace/doc/<name>` |
 | Read | `GET /:namespace/doc/<name>` |
 | Write / create | `PUT /:namespace/doc/<name>` |
