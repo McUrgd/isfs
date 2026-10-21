@@ -49,7 +49,7 @@ Whether the mounted volume can actually be opened and browsed is a separate requ
 
 ### REQ-MOUNT-002 — A mount point is mandatory
 
-Status: approved
+Status: implemented
 
 ISFS must refuse to start the file system when no mount point is supplied.
 
@@ -124,7 +124,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-009 — Atelier server address and namespace are required
 
-Status: draft
+Status: implemented
 
 ISFS must require the address of the Atelier server, passed as the `-p host:port`
 parameter of `isfs.exe`. The parameter carries the host and the web port only; the base URL
@@ -194,7 +194,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-018 — Root directory contents
 
-Status: draft
+Status: approved
 
 The value of `-ns` is the `:namespace` of every Atelier request and the root of the mounted
 volume: `\` maps to `:namespace`, and the volume exposes only that one namespace. It is not a
@@ -208,8 +208,6 @@ Acceptance criteria:
 - Requests issued while enumerating `\` target only the `-ns` namespace; no other namespace
   is queried.
 - Document and category entries keep the server's canonical casing.
-- When the `-ns` namespace contains no documents, enumerating `\` returns no entries and no
-  error, so the drive appears as an empty disk that can still be opened and browsed.
 
 ### REQ-MOUNT-019 — Case-insensitive path resolution
 

@@ -23,6 +23,7 @@
 #include <winfsp/winfsp.h>
 #include <strsafe.h>
 #include <winhttp.h>
+#include <wctype.h>
 
 #define PROGNAME                        "isfs"
 #define VOLUME_NAME                     "ISFS"
@@ -51,7 +52,82 @@ typedef struct
 {
     HANDLE Handle;
     PVOID DirBuffer;
+    BOOLEAN IsRoot; /* "\" is the namespace root, a synthetic directory (REQ-MOUNT-018) */
 } PTFS_FILE_CONTEXT;
+
+/* the volume root is the -ns namespace: WinFsp passes "\" for it, possibly
+ * with leading separators (REQ-MOUNT-018)
+ */
+static BOOLEAN IsRootFileName(PCWSTR FileName)
+{
+    if (0 == FileName)
+        return FALSE;
+
+    while (L'\\' == *FileName || L'/' == *FileName)
+        FileName++;
+
+    return L'\0' == *FileName;
+}
+
+/* synthetic directories have no local backing object, so their metadata is
+ * generated instead of read from a handle (REQ-MOUNT-018)
+ */
+static NTSTATUS GetSyntheticDirInfo(FSP_FSCTL_FILE_INFO* FileInfo)
+{
+    FILETIME Time;
+
+    GetSystemTimeAsFileTime(&Time);
+
+    memset(FileInfo, 0, sizeof *FileInfo);
+    FileInfo->FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+    FileInfo->FileSize = 0;
+    FileInfo->AllocationSize = 0;
+    FileInfo->CreationTime = ((PLARGE_INTEGER)&Time)->QuadPart;
+    FileInfo->LastAccessTime = FileInfo->CreationTime;
+    FileInfo->LastWriteTime = FileInfo->CreationTime;
+    FileInfo->ChangeTime = FileInfo->CreationTime;
+    FileInfo->IndexNumber = 0;
+    FileInfo->HardLinks = 0;
+
+    return STATUS_SUCCESS;
+}
+
+/* case-insensitive wildcard match used for the synthetic root entries;
+ * WinFsp passes the search pattern because PassQueryDirectoryPattern is set
+ */
+static BOOLEAN PtfsMatchPattern(PCWSTR Pattern, PCWSTR Name)
+{
+    /* Win32 treats "*.*" as "all names"; FindFirstFileW did the same */
+    if (L'\0' != Pattern[0] &&
+        L'*' == Pattern[0] && L'.' == Pattern[1] && L'*' == Pattern[2] &&
+        L'\0' == Pattern[3])
+        return TRUE;
+    while (L'\0' != *Pattern)
+    {
+        if (L'*' == *Pattern)
+        {
+            while (L'*' == *Pattern)
+                Pattern++;
+            if (L'\0' == *Pattern)
+                return TRUE;
+            for (; L'\0' != *Name; Name++)
+                if (PtfsMatchPattern(Pattern, Name))
+                    return TRUE;
+            return FALSE;
+        }
+
+        if (L'\0' == *Name)
+            return FALSE;
+
+        if (L'?' != *Pattern && towupper(*Pattern) != towupper(*Name))
+            return FALSE;
+
+        Pattern++;
+        Name++;
+    }
+
+    return L'\0' == *Name;
+}
 
 /* base64 is needed for the HTTP Basic header; Windows has no plain base64 API
  * that does not pull in crypt32, so encode in place
@@ -448,6 +524,10 @@ static NTSTATUS Create(FSP_FILE_SYSTEM* FileSystem,
     ULONG CreateFlags;
     PTFS_FILE_CONTEXT* FileContext;
 
+    /* the namespace root already exists and cannot be created (REQ-MOUNT-018) */
+    if (IsRootFileName(FileName))
+        return STATUS_OBJECT_NAME_COLLISION;
+
     if (!ConcatPath(Ptfs, FileName, FullPath))
         return STATUS_OBJECT_NAME_INVALID;
 
@@ -503,6 +583,23 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
     WCHAR FullPath[FULLPATH_SIZE];
     ULONG CreateFlags;
     PTFS_FILE_CONTEXT* FileContext;
+
+    /* the root is a synthetic directory backed by the -ns namespace, not by
+     * a local path (REQ-MOUNT-018)
+     */
+    if (IsRootFileName(FileName))
+    {
+        FileContext = malloc(sizeof * FileContext);
+        if (0 == FileContext)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        memset(FileContext, 0, sizeof * FileContext);
+        FileContext->IsRoot = TRUE;
+        FileContext->Handle = INVALID_HANDLE_VALUE;
+
+        *PFileContext = FileContext;
+
+        return GetSyntheticDirInfo(FileInfo);
+    }
 
     if (!ConcatPath(Ptfs, FileName, FullPath))
         return STATUS_OBJECT_NAME_INVALID;
@@ -574,7 +671,14 @@ static NTSTATUS Overwrite(FSP_FILE_SYSTEM* FileSystem,
 static VOID Cleanup(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext, PWSTR FileName, ULONG Flags)
 {
+    PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
+
+    /* synthetic directories have no local handle and cannot be deleted
+     * (REQ-MOUNT-018)
+     */
+    if (Context->IsRoot)
+        return;
 
     if (Flags & FspCleanupDelete)
     {
@@ -591,7 +695,8 @@ static VOID Close(FSP_FILE_SYSTEM* FileSystem,
     PTFS_FILE_CONTEXT* FileContext = FileContext0;
     HANDLE Handle = HandleFromContext(FileContext);
 
-    CloseHandle(Handle);
+    if (!FileContext->IsRoot)
+        CloseHandle(Handle);
 
     FspFileSystemDeleteDirectoryBuffer(&FileContext->DirBuffer);
     free(FileContext);
@@ -662,9 +767,12 @@ static NTSTATUS GetFileInfo(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext,
     FSP_FSCTL_FILE_INFO* FileInfo)
 {
-    HANDLE Handle = HandleFromContext(FileContext);
+    PTFS_FILE_CONTEXT* Context = FileContext;
 
-    return GetFileInfoInternal(Handle, FileInfo);
+    if (Context->IsRoot)
+        return GetSyntheticDirInfo(FileInfo);
+
+    return GetFileInfoInternal(HandleFromContext(FileContext), FileInfo);
 }
 
 static NTSTATUS SetBasicInfo(FSP_FILE_SYSTEM* FileSystem,
@@ -807,51 +915,79 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM* FileSystem,
     {
         if (0 == Pattern)
             Pattern = L"*";
-        PatternLength = (ULONG)wcslen(Pattern);
 
-        Length = GetFinalPathNameByHandleW(Handle, FullPath, FULLPATH_SIZE - 1, 0);
-        if (0 == Length)
-            DirBufferResult = FspNtStatusFromWin32(GetLastError());
-        else if (Length + 1 + PatternLength >= FULLPATH_SIZE)
-            DirBufferResult = STATUS_OBJECT_NAME_INVALID;
-        if (!NT_SUCCESS(DirBufferResult))
+        if (FileContext->IsRoot)
         {
-            FspFileSystemReleaseDirectoryBuffer(&FileContext->DirBuffer);
-            return DirBufferResult;
-        }
+            /* REQ-MOUNT-018: the root is the -ns namespace and lists only the
+             * synthetic category directories; documents and the namespace name
+             * itself are never root entries, and no local path is touched.
+             */
+            static PCWSTR Categories[] = { L"CLS", L"CSP", L"RTN", L"OTH" };
+            ULONG Index;
 
-        if (L'\\' != FullPath[Length - 1])
-            FullPath[Length++] = L'\\';
-        memcpy(FullPath + Length, Pattern, PatternLength * sizeof(WCHAR));
-        FullPath[Length + PatternLength] = L'\0';
-
-        FindHandle = FindFirstFileW(FullPath, &FindData);
-        if (INVALID_HANDLE_VALUE != FindHandle)
-        {
-            do
+            for (Index = 0; Index < ARRAYSIZE(Categories); Index++)
             {
+                if (!PtfsMatchPattern(Pattern, Categories[Index]))
+                    continue;
+
                 memset(DirInfo, 0, sizeof * DirInfo);
-                Length = (ULONG)wcslen(FindData.cFileName);
+                Length = (ULONG)wcslen(Categories[Index]);
                 DirInfo->Size = (UINT16)(FIELD_OFFSET(FSP_FSCTL_DIR_INFO, FileNameBuf) + Length * sizeof(WCHAR));
-                DirInfo->FileInfo.FileAttributes = FindData.dwFileAttributes;
-                DirInfo->FileInfo.ReparseTag = 0;
-                DirInfo->FileInfo.FileSize =
-                    ((UINT64)FindData.nFileSizeHigh << 32) | (UINT64)FindData.nFileSizeLow;
-                DirInfo->FileInfo.AllocationSize = (DirInfo->FileInfo.FileSize + ALLOCATION_UNIT - 1)
-                    / ALLOCATION_UNIT * ALLOCATION_UNIT;
-                DirInfo->FileInfo.CreationTime = ((PLARGE_INTEGER)&FindData.ftCreationTime)->QuadPart;
-                DirInfo->FileInfo.LastAccessTime = ((PLARGE_INTEGER)&FindData.ftLastAccessTime)->QuadPart;
-                DirInfo->FileInfo.LastWriteTime = ((PLARGE_INTEGER)&FindData.ftLastWriteTime)->QuadPart;
-                DirInfo->FileInfo.ChangeTime = DirInfo->FileInfo.LastWriteTime;
-                DirInfo->FileInfo.IndexNumber = 0;
-                DirInfo->FileInfo.HardLinks = 0;
-                memcpy(DirInfo->FileNameBuf, FindData.cFileName, Length * sizeof(WCHAR));
+                GetSyntheticDirInfo(&DirInfo->FileInfo);
+                memcpy(DirInfo->FileNameBuf, Categories[Index], Length * sizeof(WCHAR));
 
                 if (!FspFileSystemFillDirectoryBuffer(&FileContext->DirBuffer, DirInfo, &DirBufferResult))
                     break;
-            } while (FindNextFileW(FindHandle, &FindData));
+            }
+        }
+        else
+        {
+            PatternLength = (ULONG)wcslen(Pattern);
 
-            FindClose(FindHandle);
+            Length = GetFinalPathNameByHandleW(Handle, FullPath, FULLPATH_SIZE - 1, 0);
+            if (0 == Length)
+                DirBufferResult = FspNtStatusFromWin32(GetLastError());
+            else if (Length + 1 + PatternLength >= FULLPATH_SIZE)
+                DirBufferResult = STATUS_OBJECT_NAME_INVALID;
+            if (!NT_SUCCESS(DirBufferResult))
+            {
+                FspFileSystemReleaseDirectoryBuffer(&FileContext->DirBuffer);
+                return DirBufferResult;
+            }
+
+            if (L'\\' != FullPath[Length - 1])
+                FullPath[Length++] = L'\\';
+            memcpy(FullPath + Length, Pattern, PatternLength * sizeof(WCHAR));
+            FullPath[Length + PatternLength] = L'\0';
+
+            FindHandle = FindFirstFileW(FullPath, &FindData);
+            if (INVALID_HANDLE_VALUE != FindHandle)
+            {
+                do
+                {
+                    memset(DirInfo, 0, sizeof * DirInfo);
+                    Length = (ULONG)wcslen(FindData.cFileName);
+                    DirInfo->Size = (UINT16)(FIELD_OFFSET(FSP_FSCTL_DIR_INFO, FileNameBuf) + Length * sizeof(WCHAR));
+                    DirInfo->FileInfo.FileAttributes = FindData.dwFileAttributes;
+                    DirInfo->FileInfo.ReparseTag = 0;
+                    DirInfo->FileInfo.FileSize =
+                        ((UINT64)FindData.nFileSizeHigh << 32) | (UINT64)FindData.nFileSizeLow;
+                    DirInfo->FileInfo.AllocationSize = (DirInfo->FileInfo.FileSize + ALLOCATION_UNIT - 1)
+                        / ALLOCATION_UNIT * ALLOCATION_UNIT;
+                    DirInfo->FileInfo.CreationTime = ((PLARGE_INTEGER)&FindData.ftCreationTime)->QuadPart;
+                    DirInfo->FileInfo.LastAccessTime = ((PLARGE_INTEGER)&FindData.ftLastAccessTime)->QuadPart;
+                    DirInfo->FileInfo.LastWriteTime = ((PLARGE_INTEGER)&FindData.ftLastWriteTime)->QuadPart;
+                    DirInfo->FileInfo.ChangeTime = DirInfo->FileInfo.LastWriteTime;
+                    DirInfo->FileInfo.IndexNumber = 0;
+                    DirInfo->FileInfo.HardLinks = 0;
+                    memcpy(DirInfo->FileNameBuf, FindData.cFileName, Length * sizeof(WCHAR));
+
+                    if (!FspFileSystemFillDirectoryBuffer(&FileContext->DirBuffer, DirInfo, &DirBufferResult))
+                        break;
+                } while (FindNextFileW(FindHandle, &FindData));
+
+                FindClose(FindHandle);
+            }
         }
 
         FspFileSystemReleaseDirectoryBuffer(&FileContext->DirBuffer);
