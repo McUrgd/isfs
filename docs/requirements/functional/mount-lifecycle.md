@@ -15,8 +15,9 @@ Source sections of [`docs/architecture/overview.md`](../../architecture/overview
 ## Mount-time configuration
 
 Inputs referenced by the requirements below. Names are indicative; the concrete
-configuration surface (command line, config file, service parameters) is decided with
-`connection-auth.md`.
+configuration surface is the command line of `isfs.exe` — a configuration file,
+service parameters and an interactive prompt are not supported in v1
+([`connection-auth.md`](connection-auth.md), REQ-CONN-018).
 
 | Setting | Required | Default | Used by |
 |---|---|---|---|
@@ -149,9 +150,9 @@ Acceptance criteria:
 - The `-ns` value is not exposed as a directory: the volume root represents the namespace
   itself.
 
-> Open point: because `-p` carries no scheme, the composed base URL is plain `http`. How TLS
-> is selected (a separate switch, a scheme-tolerant `-p`, or a global setting) is decided
-> with `connection-auth.md` before TLS-only deployments are supported.
+> Resolved: the scheme is always `http` and TLS is not supported in v1. The decision and
+> its rationale are in [`connection-auth.md`](connection-auth.md) (REQ-CONN-001,
+> REQ-CONN-002).
 
 ### REQ-MOUNT-010 — Credentials come from launch parameters and are held in memory only
 
@@ -194,7 +195,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-018 — Root directory contents
 
-Status: approved
+Status: implemented
 
 The value of `-ns` is the `:namespace` of every Atelier request and the root of the mounted
 volume: `\` maps to `:namespace`, and the volume exposes only that one namespace. It is not a
@@ -248,7 +249,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-022 — Unmount releases the mount point
 
-Status: draft
+Status: implemented
 
 Stopping the mount must release the drive letter and make the volume unavailable.
 
@@ -323,7 +324,7 @@ Acceptance criteria:
 
 From overview §12, to be resolved and folded into the requirements above:
 
-- read-only namespace policy (REQ-MOUNT-020).
+- mount-wide read-only mode (REQ-MOUNT-020).
 
 Resolved: authentication uses a login and password passed as the `-user` and `-pass`
 parameters of `isfs.exe`, kept in memory only (REQ-MOUNT-010).
@@ -332,13 +333,18 @@ Resolved: the volume reports `TotalSize = 0` and `FreeSize = 0`, meaning "size u
 the values are not configurable (REQ-MOUNT-008).
 
 Resolved: the Atelier server address is passed as `-p <host:port>`; ISFS composes
-`http://<host:port>/api/atelier/v1` from it (REQ-MOUNT-009). TLS selection is still open.
+`http://<host:port>/api/atelier/v1` from it (REQ-MOUNT-009). The scheme is always `http`
+and TLS is not supported in v1 (`connection-auth.md`, REQ-CONN-001, REQ-CONN-002).
 
 Resolved: the mount probe uses HTTP Basic credentials, and a `401` aborts the mount
 (REQ-MOUNT-012).
+
+Resolved: namespace rights are decided by the server; ISFS keeps no list of readable or
+read-only namespaces (`connection-auth.md`, REQ-CONN-017).
 
 ## Related documents
 
 - Architecture: [`docs/architecture/overview.md`](../../architecture/overview.md)
 - API reference: [`docs/architecture/api.md`](../../architecture/api.md)
 - Requirements index: [`docs/requirements/README.md`](../README.md)
+- Connection and authentication: [`connection-auth.md`](connection-auth.md)
