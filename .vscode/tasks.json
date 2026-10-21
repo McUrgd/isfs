@@ -3,14 +3,16 @@
     "tasks": [
         {
             "label": "winfsp: copy runtime dll",
-            "type": "shell",
-            "command": "powershell",
+            "type": "process",
+            "command": "powershell.exe",
             "args": [
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
-                "-Command",
-                "$dir = (Get-ItemProperty 'HKLM:\\SOFTWARE\\WOW6432Node\\WinFsp' -ErrorAction SilentlyContinue).InstallDir; if (-not $dir) { $dir = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'WinFsp' }; $src = Join-Path $dir 'bin\\winfsp-x64.dll'; if (-not (Test-Path $src)) { Write-Error \"winfsp-x64.dll not found in '$dir' - install WinFsp x64 first\"; exit 1 }; Copy-Item $src '${workspaceFolder}\\isfs' -Force -ErrorAction Stop; Write-Host \"copied $src to ${workspaceFolder}\\isfs\""
+                "-File",
+                "${workspaceFolder}\\scripts\\copy-winfsp-dll.ps1",
+                "-DestinationDir",
+                "${workspaceFolder}\\isfs"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"

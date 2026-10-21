@@ -20,9 +20,13 @@ The VS Code build task (`.vscode/tasks.json`, Ctrl+Shift+B on `isfs/isfs.c`) com
 ```
 cl /nologo /Zi /MT /D_DEBUG /D_CONSOLE /DUNICODE /D_UNICODE ^
    /I passthrough ^
-   /Fe isfs\isfs.exe /Fo isfs\ isfs\isfs.c ^
-   /link passthrough\lib\winfsp-x64.lib advapi32.lib
+   /Feisfs\isfs.exe /Foisfs\ isfs\isfs.c ^
+   /link passthrough\lib\winfsp-x64.lib advapi32.lib winhttp.lib
 ```
+
+Note: the value of `/Fe` and `/Fo` must be attached to the option (no space). The compiler
+from Visual Studio 2026 (18.x) does not accept `/Fe <name>` and reports
+`D9024: unrecognized source file type`, treating the name as a source file.
 
 === Runtime DLL ===
 
@@ -32,6 +36,11 @@ and does not add that directory to `PATH`, so the loader cannot find it (error 0
 
 The VS Code build task solves this by copying the DLL next to the executable
 (`isfs\winfsp-x64.dll`), so no `PATH` changes are needed. The file is listed in `.gitignore`.
+
+The copy is done by `scripts\copy-winfsp-dll.ps1`, which searches for the WinFsp installation
+(registry `HKLM\SOFTWARE\WOW6432Node\WinFsp`, then the `Program Files (x86)\WinFsp` fallback).
+It is called by the `winfsp: copy runtime dll` task via `powershell.exe -File`, i.e. without an
+intermediate shell, so that no nested quoting is involved.
 
 Alternatives:
 
