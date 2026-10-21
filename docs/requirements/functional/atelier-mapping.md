@@ -20,8 +20,8 @@ ISFS).
 
 > Current state: the repository contains the WinFsp passthrough skeleton
 > (`isfs/isfs.c`); the Atelier-backed volume source is not implemented yet. Every
-> requirement below is therefore `draft`, except REQ-MAP-001, which the current
-> build already satisfies.
+> requirement below is therefore `draft`, except REQ-MAP-001 and REQ-MAP-002,
+> which the current build already satisfies.
 
 ## Path model
 
@@ -86,18 +86,17 @@ Acceptance criteria:
 
 ### REQ-MAP-002 — The root contains only category directories
 
-Status: draft
+Status: implemented
 
 The root of the volume must contain only the synthetic category directories and
 no files.
 
 Acceptance criteria:
-- A listing of `\` reports the categories of the documents of the namespace
-  and nothing else.
+- A listing of `\` reports the fixed set of category directories — `CLS`, `CSP`,
+  `RTN` and `OTH` — and nothing else; the set does not depend on the documents
+  of the namespace.
 - No file is reported at the root: every document of the namespace belongs to a
   category.
-- A category that holds no document is not reported; the root of a namespace
-  without documents of that category has no such entry.
 
 ### REQ-MAP-003 — The first segment of a document path is its category
 
