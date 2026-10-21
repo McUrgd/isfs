@@ -25,6 +25,7 @@
 
 #define PROGNAME                        "isfs"
 #define VOLUME_NAME                     "ISFS"
+#define ATELIER_API_PATH                "/api/atelier/v1"
 #define ALLOCATION_UNIT                 4096
 #define FULLPATH_SIZE                   (MAX_PATH + FSP_FSCTL_TRANSACT_PATH_SIZEMAX / sizeof(WCHAR))
 
@@ -32,13 +33,13 @@
 #define warn(format, ...)               FspServiceLog(EVENTLOG_WARNING_TYPE, format, __VA_ARGS__)
 #define fail(format, ...)               FspServiceLog(EVENTLOG_ERROR_TYPE, format, __VA_ARGS__)
 
-#define ConcatPath(Ptfs, FN, FP)        (0 == StringCbPrintfW(FP, sizeof FP, L"%s%s", Ptfs->Path, FN))
+#define ConcatPath(Ptfs, FN, FP)        (0 == StringCbPrintfW(FP, sizeof FP, L"%s%s", Ptfs->BaseUrl, FN))
 #define HandleFromContext(FC)           (((PTFS_FILE_CONTEXT *)(FC))->Handle)
 
 typedef struct
 {
     FSP_FILE_SYSTEM* FileSystem;
-    PWSTR Path;
+    PWSTR BaseUrl; /* http://host:port/api/atelier/v1 (REQ-MOUNT-009) */
 } PTFS;
 
 typedef struct
@@ -74,18 +75,11 @@ static NTSTATUS GetFileInfoInternal(HANDLE Handle, FSP_FSCTL_FILE_INFO* FileInfo
 static NTSTATUS GetVolumeInfo(FSP_FILE_SYSTEM* FileSystem,
     FSP_FSCTL_VOLUME_INFO* VolumeInfo)
 {
-    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
-    WCHAR Root[MAX_PATH];
-    ULARGE_INTEGER TotalSize, FreeSize;
-
-    if (!GetVolumePathName(Ptfs->Path, Root, MAX_PATH))
-        return FspNtStatusFromWin32(GetLastError());
-
-    if (!GetDiskFreeSpaceEx(Root, 0, &TotalSize, &FreeSize))
-        return FspNtStatusFromWin32(GetLastError());
-
-    VolumeInfo->TotalSize = TotalSize.QuadPart;
-    VolumeInfo->FreeSize = FreeSize.QuadPart;
+    /* the remote volume has no local backing directory; sizes stay at zero until
+     * REQ-MOUNT-008 defines the synthetic values
+     */
+    VolumeInfo->TotalSize = 0;
+    VolumeInfo->FreeSize = 0;
 
     /* the volume label does not depend on the server (REQ-MOUNT-006) */
     memset(VolumeInfo->VolumeLabel, 0, sizeof VolumeInfo->VolumeLabel);
@@ -632,46 +626,16 @@ static FSP_FILE_SYSTEM_INTERFACE PtfsInterface =
 
 static VOID PtfsDelete(PTFS* Ptfs);
 
-static NTSTATUS PtfsCreate(PWSTR Path, PWSTR VolumePrefix, PWSTR MountPoint, UINT32 DebugFlags,
+static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR VolumePrefix, PWSTR MountPoint, UINT32 DebugFlags,
     PTFS** PPtfs)
 {
-    WCHAR FullPath[MAX_PATH];
-    ULONG Length;
-    HANDLE Handle;
     FILETIME CreationTime;
-    DWORD LastError;
     FSP_FSCTL_VOLUME_PARAMS VolumeParams;
     PTFS* Ptfs = 0;
+    SIZE_T Length;
     NTSTATUS Result;
 
     *PPtfs = 0;
-
-    Handle = CreateFileW(
-        Path, FILE_READ_ATTRIBUTES, 0, 0,
-        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
-    if (INVALID_HANDLE_VALUE == Handle)
-        return FspNtStatusFromWin32(GetLastError());
-
-    Length = GetFinalPathNameByHandleW(Handle, FullPath, FULLPATH_SIZE - 1, 0);
-    if (0 == Length)
-    {
-        LastError = GetLastError();
-        CloseHandle(Handle);
-        return FspNtStatusFromWin32(LastError);
-    }
-    if (L'\\' == FullPath[Length - 1])
-        FullPath[--Length] = L'\0';
-
-    if (!GetFileTime(Handle, &CreationTime, 0, 0))
-    {
-        LastError = GetLastError();
-        CloseHandle(Handle);
-        return FspNtStatusFromWin32(LastError);
-    }
-
-    CloseHandle(Handle);
-
-    /* from now on we must goto exit on failure */
 
     Ptfs = malloc(sizeof * Ptfs);
     if (0 == Ptfs)
@@ -681,14 +645,18 @@ static NTSTATUS PtfsCreate(PWSTR Path, PWSTR VolumePrefix, PWSTR MountPoint, UIN
     }
     memset(Ptfs, 0, sizeof * Ptfs);
 
-    Length = (Length + 1) * sizeof(WCHAR);
-    Ptfs->Path = malloc(Length);
-    if (0 == Ptfs->Path)
+    /* from now on we must goto exit on failure */
+
+    Length = (wcslen(BaseUrl) + 1) * sizeof(WCHAR);
+    Ptfs->BaseUrl = malloc(Length);
+    if (0 == Ptfs->BaseUrl)
     {
         Result = STATUS_INSUFFICIENT_RESOURCES;
         goto exit;
     }
-    memcpy(Ptfs->Path, FullPath, Length);
+    memcpy(Ptfs->BaseUrl, BaseUrl, Length);
+
+    GetSystemTimeAsFileTime(&CreationTime);
 
     memset(&VolumeParams, 0, sizeof VolumeParams);
     VolumeParams.SectorSize = ALLOCATION_UNIT;
@@ -740,8 +708,8 @@ static VOID PtfsDelete(PTFS* Ptfs)
     if (0 != Ptfs->FileSystem)
         FspFileSystemDelete(Ptfs->FileSystem);
 
-    if (0 != Ptfs->Path)
-        free(Ptfs->Path);
+    if (0 != Ptfs->BaseUrl)
+        free(Ptfs->BaseUrl);
 
     free(Ptfs);
 }
@@ -794,10 +762,10 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     PWSTR DebugLogFile = 0;
     ULONG DebugFlags = 0;
     PWSTR VolumePrefix = 0;
-    PWSTR PassThrough = 0;
+    PWSTR ServerAddress = 0;
     PWSTR MountPoint = 0;
     HANDLE DebugLogHandle = INVALID_HANDLE_VALUE;
-    WCHAR PassThroughBuf[MAX_PATH];
+    WCHAR BaseUrlBuf[MAX_PATH];
     PTFS* Ptfs = 0;
     NTSTATUS Result;
 
@@ -819,7 +787,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
             argtos(MountPoint);
             break;
         case L'p':
-            argtos(PassThrough);
+            argtos(ServerAddress);
             break;
         case L'u':
             argtos(VolumePrefix);
@@ -832,28 +800,12 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     if (arge > argp)
         goto usage;
 
-    if (0 == PassThrough && 0 != VolumePrefix)
-    {
-        PWSTR P;
+    if (0 == ServerAddress || 0 == MountPoint)
+        goto usage;
 
-        P = wcschr(VolumePrefix, L'\\');
-        if (0 != P && L'\\' != P[1])
-        {
-            P = wcschr(P + 1, L'\\');
-            if (0 != P &&
-                (
-                    (L'A' <= P[1] && P[1] <= L'Z') ||
-                    (L'a' <= P[1] && P[1] <= L'z')
-                    ) &&
-                L'$' == P[2])
-            {
-                StringCbPrintf(PassThroughBuf, sizeof PassThroughBuf, L"%c:%s", P[1], P + 3);
-                PassThrough = PassThroughBuf;
-            }
-        }
-    }
-
-    if (0 == PassThrough || 0 == MountPoint)
+    /* REQ-MOUNT-009: -p carries host:port only; the base URL is composed here */
+    if (FAILED(StringCbPrintfW(BaseUrlBuf, sizeof BaseUrlBuf, L"http://%s" ATELIER_API_PATH,
+        ServerAddress)))
         goto usage;
 
     EnableBackupRestorePrivileges();
@@ -880,7 +832,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         FspDebugLogSetHandle(DebugLogHandle);
     }
 
-    Result = PtfsCreate(PassThrough, VolumePrefix, MountPoint, DebugFlags, &Ptfs);
+    Result = PtfsCreate(BaseUrlBuf, VolumePrefix, MountPoint, DebugFlags, &Ptfs);
     if (!NT_SUCCESS(Result))
     {
         fail(L"cannot create file system");
@@ -900,7 +852,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         L"" PROGNAME,
         0 != VolumePrefix && L'\0' != VolumePrefix[0] ? L" -u " : L"",
         0 != VolumePrefix && L'\0' != VolumePrefix[0] ? VolumePrefix : L"",
-        PassThrough,
+        BaseUrlBuf,
         MountPoint);
 
     Service->UserContext = Ptfs;
@@ -921,7 +873,8 @@ usage:
             "    -d DebugFlags       [-1: enable all debug logs]\n"
             "    -D DebugLogFile     [file path; use - for stderr]\n"
             "    -u \\Server\\Share    [UNC prefix (single backslash)]\n"
-            "    -p Directory        [directory to expose as pass through file system]\n"
+            "    -p Host:Port        [Atelier server address; base URL is http://Host:Port"
+                ATELIER_API_PATH "]\n"
             "    -m MountPoint       [X:|*|directory]\n";
 
         fail(usage, L"" PROGNAME);

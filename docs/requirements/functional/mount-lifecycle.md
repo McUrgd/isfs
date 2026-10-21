@@ -21,7 +21,7 @@ configuration surface (command line, config file, service parameters) is decided
 | Setting | Required | Default | Used by |
 |---|---|---|---|
 | Mount point (drive letter `X:`) | yes | — | REQ-MOUNT-002, 003, 005, 022 |
-| Atelier base URL (`http(s)://host:port/api/atelier/v1`) | yes | — | REQ-MOUNT-009, 011 |
+| Atelier server address (`-p host:port`) | yes | — | REQ-MOUNT-009, 011 |
 | Credentials: login (`-user`) | yes | — | REQ-MOUNT-010, 012 |
 | Credentials: password (`-pass`) | yes | — | REQ-MOUNT-010, 012 |
 | Connect/read timeout | no | 30 s | REQ-MOUNT-011 |
@@ -108,20 +108,26 @@ Acceptance criteria:
 - With configured values, Explorer and `fsutil volume diskfree X:` show those values.
 - Changing the configuration changes the reported values without contacting the server.
 
-### REQ-MOUNT-009 — Atelier base URL is required
+### REQ-MOUNT-009 — Atelier server address is required
 
 Status: draft
 
-ISFS must require the base URL of the Atelier v1 endpoint. The URL is not validated ahead of
-the mount attempt: it is used as given.
+ISFS must require the address of the Atelier server, passed as the `-p host:port`
+parameter of `isfs.exe`. The parameter carries the host and the web port only; the base URL
+of the endpoint is composed by ISFS as `http://<host:port>/api/atelier/v1`. The address is
+not validated ahead of the mount attempt: it is used as given.
 
 Acceptance criteria:
-- Running without the base URL prints usage, creates no volume, and exits with a non-zero
-  status.
-- With a valid URL, requests are issued to `<base>/%SYS/namespaces` and
-  `<base>/:namespace`.
-- A malformed or unreachable URL is not rejected up front; the mount fails at the server
-  probe with an actionable error naming the endpoint (REQ-MOUNT-011).
+- Running without `-p` prints usage, creates no volume, and exits with a non-zero status.
+- With `-p <host:port>`, requests are issued to
+  `http://<host:port>/api/atelier/v1/%SYS/namespaces` and
+  `http://<host:port>/api/atelier/v1/:namespace`.
+- A malformed or unreachable address is not rejected up front; the mount fails at the
+  server probe with an actionable error naming the endpoint (REQ-MOUNT-011).
+
+> Open point: because `-p` carries no scheme, the composed base URL is plain `http`. How TLS
+> is selected (a separate switch, a scheme-tolerant `-p`, or a global setting) is decided
+> with `connection-auth.md` before TLS-only deployments are supported.
 
 ### REQ-MOUNT-010 — Credentials come from launch parameters and are held in memory only
 
@@ -132,7 +138,7 @@ ISFS must take the login and the password from the `-user` and `-pass` parameter
 to logs, debug output, or any file.
 
 Acceptance criteria:
-- `isfs.exe -user <login> -pass <password> -m <mount point> <base URL>` mounts the volume
+- `isfs.exe -user <login> -pass <password> -p <host:port> -m <mount point>` mounts the volume
   using exactly those credentials.
 - Running without `-user` or without `-pass` prints usage, creates no volume, and exits with
   a non-zero status (same behaviour as a missing mount point, REQ-MOUNT-002).
@@ -312,6 +318,9 @@ From overview §12, to be resolved and folded into the requirements above:
 
 Resolved: authentication uses a login and password passed as the `-user` and `-pass`
 parameters of `isfs.exe`, kept in memory only (REQ-MOUNT-010).
+
+Resolved: the Atelier server address is passed as `-p <host:port>`; ISFS composes
+`http://<host:port>/api/atelier/v1` from it (REQ-MOUNT-009). TLS selection is still open.
 
 Resolved: namespace discovery has no fallback. When `GET /%SYS/namespaces` is unavailable,
 the mount fails with an actionable error and no volume remains (REQ-MOUNT-013).
