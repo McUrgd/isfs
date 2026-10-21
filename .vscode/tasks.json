@@ -25,7 +25,7 @@
         },
         {
             "type": "cppbuild",
-            "label": "C/C++: cl.exe build active file",
+            "label": "isfs: build",
             "command": "cl.exe",
             "args": [
                 "/nologo",
@@ -36,10 +36,12 @@
                 "/DUNICODE",
                 "/D_UNICODE",
                 "/I${workspaceFolder}\\passthrough",
-                "/Fe${workspaceFolder}\\isfs\\${fileBasenameNoExtension}.exe",
+                "/I${workspaceFolder}",
+                "/Fe${workspaceFolder}\\isfs\\isfs.exe",
                 "/Fo${workspaceFolder}\\isfs\\",
                 "/Fd${workspaceFolder}\\isfs\\",
-                "${file}",
+                "${workspaceFolder}\\isfs\\isfs.c",
+                "${workspaceFolder}\\cjson\\cJSON.c",
                 "/link",
                 "${workspaceFolder}\\passthrough\\lib\\winfsp-x64.lib",
                 "advapi32.lib",
@@ -58,7 +60,7 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "detail": "WinFsp: passthrough\\winfsp (headers) + passthrough\\lib\\winfsp-x64.lib + winhttp.lib; winfsp-x64.dll is copied next to the exe"
+            "detail": "WinFsp: passthrough\\winfsp (headers) + passthrough\\lib\\winfsp-x64.lib + winhttp.lib; JSON: cjson (cJSON.c); winfsp-x64.dll is copied next to the exe"
         }
     ]
 }

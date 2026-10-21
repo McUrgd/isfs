@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file isfs.c
  *
  * @copyright 2015-2025 Bill Zissimopoulos
@@ -25,12 +25,22 @@
 #include <winhttp.h>
 #include <wctype.h>
 #include <sddl.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "cjson/cJSON.h"
 
 #define PROGNAME                        "isfs"
 #define VOLUME_NAME                     "ISFS"
 #define ATELIER_API_PATH                "/api/atelier/v1"
 /* connect/send/receive timeout for the mount probe (REQ-MOUNT-021) */
 #define ATELIER_TIMEOUT_MS              30000
+/* the answer of the server is read into memory; the limit protects the
+ * process against an endless answer
+ */
+#define ATELIER_MAX_RESPONSE_SIZE       (64 * 1024 * 1024)
+/* the lifetime of a document descriptor cache entry (overview §8) */
+#define DESCRIPTOR_CACHE_TTL_MS         30000
 #define ALLOCATION_UNIT                 4096
 #define FULLPATH_SIZE                   (MAX_PATH + FSP_FSCTL_TRANSACT_PATH_SIZEMAX / sizeof(WCHAR))
 
@@ -41,12 +51,53 @@
 #define ConcatPath(Ptfs, FN, FP)        (0 == StringCbPrintfW(FP, sizeof FP, L"%s%s", Ptfs->BaseUrl, FN))
 #define HandleFromContext(FC)           (((PTFS_FILE_CONTEXT *)(FC))->Handle)
 
+/* the categories of the volume; the order is the order of the root listing
+ * and the order of the per category caches
+ */
+static const PCWSTR Categories[] = { L"CLS", L"CSP", L"RTN", L"OTH" };
+#define CATEGORY_COUNT                 (ARRAYSIZE(Categories))
+
+/* the Atelier client of the mount: one HTTP session, the host and the path
+ * of the base URL (REQ-CONN-021, REQ-CONN-003)
+ */
+typedef struct
+{
+    HINTERNET Session;
+    WCHAR HostName[256];
+    WCHAR BasePath[1024]; /* the path of the base URL, e.g. "/api/atelier/v1/USER" */
+    INTERNET_PORT Port;
+    DWORD Flags; /* WINHTTP_FLAG_SECURE; always 0, the scheme is http (REQ-CONN-001) */
+} ATELIER_CLIENT;
+
+/* a document descriptor of a category listing (api.md §9.2) */
+typedef struct
+{
+    PWSTR Name;     /* the canonical document name, e.g. "User.Person.cls" */
+    PWSTR Category; /* CLS, CSP, RTN or OTH */
+    PWSTR Db;       /* the database that holds the document */
+    PWSTR Ts;       /* the server timestamp, "YYYY-MM-DD HH:MM:SS.mmm" */
+    BOOLEAN Generated;
+} PTFS_DESCRIPTOR;
+
+/* the descriptor cache of one category (overview §8) */
+typedef struct
+{
+    CRITICAL_SECTION Lock;
+    BOOLEAN Valid;
+    ULONGLONG Expires; /* GetTickCount64 milliseconds */
+    PTFS_DESCRIPTOR* Descriptors;
+    ULONG Count;
+} PTFS_CATEGORY_CACHE;
+
 typedef struct
 {
     FSP_FILE_SYSTEM* FileSystem;
     PWSTR BaseUrl; /* http://host:port/api/atelier/v1/<namespace> (REQ-MOUNT-009) */
     PWSTR UserName; /* login from -user, memory only (REQ-MOUNT-010) */
     PWSTR Password; /* password from -pass, memory only (REQ-MOUNT-010) */
+    PWSTR Namespace; /* the -ns value, used for the index numbers (REQ-FS-012) */
+    ATELIER_CLIENT Client; /* the HTTP client of the mount */
+    PTFS_CATEGORY_CACHE Cache[CATEGORY_COUNT]; /* the descriptor caches */
 } PTFS;
 
 typedef struct
@@ -54,6 +105,10 @@ typedef struct
     HANDLE Handle;
     PVOID DirBuffer;
     BOOLEAN IsRoot; /* "\" is the namespace root, a synthetic directory (REQ-MAP-001) */
+    BOOLEAN IsSynthetic; /* a synthetic directory: a category or a package level */
+    PWSTR Category; /* the category of a synthetic directory, e.g. "CLS" */
+    PWSTR PackagePrefix; /* the package path of a synthetic directory, e.g. "User" */
+    UINT64 Timestamp; /* the newest document timestamp below the directory */
 } PTFS_FILE_CONTEXT;
 
 /* the volume root is the -ns namespace: WinFsp passes "\" for it, possibly
@@ -71,13 +126,18 @@ static BOOLEAN IsRootFileName(PCWSTR FileName)
 }
 
 /* synthetic directories have no local backing object, so their metadata is
- * generated instead of read from a handle (REQ-MAP-001)
+ * generated instead of read from a handle (REQ-MAP-001). The index number is
+ * derived from the name of the directory (REQ-FS-012); a timestamp of 0 means
+ * "now".
  */
-static NTSTATUS GetSyntheticDirInfo(FSP_FSCTL_FILE_INFO* FileInfo)
+static NTSTATUS GetSyntheticDirInfo(FSP_FSCTL_FILE_INFO* FileInfo, UINT64 IndexNumber, UINT64 Timestamp)
 {
     FILETIME Time;
 
-    GetSystemTimeAsFileTime(&Time);
+    if (0 == Timestamp)
+        GetSystemTimeAsFileTime(&Time);
+    else
+        ((PLARGE_INTEGER)&Time)->QuadPart = (LONGLONG)Timestamp;
 
     memset(FileInfo, 0, sizeof *FileInfo);
     FileInfo->FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
@@ -87,7 +147,7 @@ static NTSTATUS GetSyntheticDirInfo(FSP_FSCTL_FILE_INFO* FileInfo)
     FileInfo->LastAccessTime = FileInfo->CreationTime;
     FileInfo->LastWriteTime = FileInfo->CreationTime;
     FileInfo->ChangeTime = FileInfo->CreationTime;
-    FileInfo->IndexNumber = 0;
+    FileInfo->IndexNumber = IndexNumber;
     FileInfo->HardLinks = 0;
 
     return STATUS_SUCCESS;
@@ -128,6 +188,334 @@ static BOOLEAN PtfsMatchPattern(PCWSTR Pattern, PCWSTR Name)
     }
 
     return L'\0' == *Name;
+}
+
+/* ------------------------------------------------------------------------
+ * Strings, names and timestamps
+ * ------------------------------------------------------------------------ */
+
+static PWSTR DupString(PCWSTR Text)
+{
+    SIZE_T Length;
+    PWSTR Copy;
+
+    if (0 == Text)
+        return 0;
+
+    Length = wcslen(Text);
+    Copy = malloc((Length + 1) * sizeof(WCHAR));
+    if (0 == Copy)
+        return 0;
+    memcpy(Copy, Text, (Length + 1) * sizeof(WCHAR));
+
+    return Copy;
+}
+
+/* splits a text into its segments; the segments are separated by the given
+ * delimiters and the segments are stored in one buffer
+ */
+static ULONG SplitByDelimiter(PCWSTR Text, WCHAR Delimiter1, WCHAR Delimiter2, PWSTR** PSegments)
+{
+    SIZE_T Length = wcslen(Text);
+    WCHAR* Buffer;
+    PWSTR* Segments;
+    WCHAR* Cursor;
+    SIZE_T Index;
+    ULONG Count = 0;
+    BOOLEAN InSegment = FALSE;
+
+    *PSegments = 0;
+
+    Buffer = malloc((Length + 2) * sizeof(WCHAR));
+    if (0 == Buffer)
+        return 0;
+    Segments = malloc((Length + 2) * sizeof(PWSTR));
+    if (0 == Segments)
+    {
+        free(Buffer);
+        return 0;
+    }
+
+    Cursor = Buffer;
+    for (Index = 0; Index <= Length; Index++)
+    {
+        WCHAR Ch = Text[Index];
+
+        if (L'\0' == Ch || Ch == Delimiter1 || (L'\0' != Delimiter2 && Ch == Delimiter2))
+        {
+            if (InSegment)
+            {
+                *Cursor = L'\0';
+                Segments[Count++] = Cursor;
+                Cursor++;
+                InSegment = FALSE;
+            }
+        }
+        else
+        {
+            *Cursor++ = Ch;
+            InSegment = TRUE;
+        }
+    }
+
+    *PSegments = Segments;
+
+    return Count;
+}
+
+static VOID FreeSegments(PWSTR* Segments, ULONG Count)
+{
+    if (0 == Segments)
+        return;
+
+    /* the segments share one buffer; the first one owns it */
+    free(Segments[0]);
+    free(Segments);
+}
+
+/* splits a document name into its package levels and its file name: the
+ * extension stays with the file and every earlier dot becomes a separator
+ * (REQ-MAP-004). A name that begins with a dot is not decomposed.
+ */
+static ULONG SplitDocumentName(PCWSTR Name, PWSTR** PSegments)
+{
+    SIZE_T Length = wcslen(Name);
+    ULONG Dots = 0, Count, Index, SegmentIndex = 0;
+    const WCHAR* Ch;
+    const WCHAR* Start;
+    WCHAR* Buffer;
+    WCHAR* Cursor;
+    PWSTR* Segments;
+
+    *PSegments = 0;
+
+    for (Ch = Name; L'\0' != *Ch; Ch++)
+        if (L'.' == *Ch)
+            Dots++;
+
+    /* the number of segments is the number of dots, but a name without a dot
+     * and a name that begins with a dot are one segment
+     */
+    Count = (0 == Dots || L'.' == Name[0]) ? 1 : Dots;
+
+    Buffer = malloc((Length + Count + 1) * sizeof(WCHAR));
+    if (0 == Buffer)
+        return 0;
+    Segments = malloc(Count * sizeof *Segments);
+    if (0 == Segments)
+    {
+        free(Buffer);
+        return 0;
+    }
+
+    Cursor = Buffer;
+    Start = Name;
+    for (Index = 0;; Index++)
+    {
+        WCHAR Ch = Name[Index];
+
+        if (L'\0' == Ch || (L'.' == Ch && SegmentIndex + 1 < Count))
+        {
+            SIZE_T SegmentLength = (SIZE_T)(&Name[Index] - Start);
+
+            memcpy(Cursor, Start, SegmentLength * sizeof(WCHAR));
+            Cursor[SegmentLength] = L'\0';
+            Segments[SegmentIndex++] = Cursor;
+            Cursor += SegmentLength + 1;
+            if (L'\0' == Ch)
+                break;
+            Start = &Name[Index + 1];
+        }
+    }
+
+    *PSegments = Segments;
+
+    return Count;
+}
+
+/* joins the segments of a package path with dots (REQ-MAP-005) */
+static PWSTR JoinDotted(PWSTR* Segments, ULONG Count)
+{
+    SIZE_T Length = 1, Index;
+    PWSTR Text;
+
+    for (Index = 0; Index < Count; Index++)
+        Length += wcslen(Segments[Index]) + 1;
+
+    Text = malloc(Length * sizeof(WCHAR));
+    if (0 == Text)
+        return 0;
+
+    Text[0] = L'\0';
+    for (Index = 0; Index < Count; Index++)
+    {
+        if (Index > 0)
+            wcscat_s(Text, Length, L".");
+        wcscat_s(Text, Length, Segments[Index]);
+    }
+
+    return Text;
+}
+
+/* a segment that Windows would reject is not exposed (REQ-MAP-013) */
+static BOOL IsLegalPathSegment(PCWSTR Segment)
+{
+    static const PCWSTR Reserved[] =
+    {
+        L"CON", L"PRN", L"AUX", L"NUL",
+        L"COM1", L"COM2", L"COM3", L"COM4", L"COM5", L"COM6", L"COM7", L"COM8", L"COM9",
+        L"LPT1", L"LPT2", L"LPT3", L"LPT4", L"LPT5", L"LPT6", L"LPT7", L"LPT8", L"LPT9"
+    };
+    SIZE_T Length = wcslen(Segment);
+    SIZE_T Index;
+    WCHAR Name[8];
+    SIZE_T NameLength = 0;
+
+    if (0 == Length)
+        return FALSE;
+
+    /* "." and ".." */
+    if (L'.' == Segment[0] && (1 == Length || (2 == Length && L'.' == Segment[1])))
+        return FALSE;
+
+    /* a name that ends with a space or a period */
+    if (L' ' == Segment[Length - 1] || L'.' == Segment[Length - 1])
+        return FALSE;
+
+    for (Index = 0; Index < Length; Index++)
+    {
+        WCHAR Ch = Segment[Index];
+
+        if (Ch < 0x20)
+            return FALSE;
+        if (L'<' == Ch || L'>' == Ch || L':' == Ch || L'"' == Ch || L'/' == Ch ||
+            L'\\' == Ch || L'|' == Ch || L'?' == Ch || L'*' == Ch)
+            return FALSE;
+    }
+
+    /* the reserved device names, with or without an extension */
+    for (Index = 0; Index < Length && L'.' != Segment[Index] && NameLength + 1 < ARRAYSIZE(Name); Index++)
+        Name[NameLength++] = towupper(Segment[Index]);
+    Name[NameLength] = L'\0';
+    for (Index = 0; Index < ARRAYSIZE(Reserved); Index++)
+        if (0 == wcscmp(Name, Reserved[Index]))
+            return FALSE;
+
+    return TRUE;
+}
+
+/* the index number of an entry is the FNV-1a 64 hash of the namespace, a NUL
+ * character and the name of the entry (REQ-FS-012)
+ */
+static UINT64 HashEntryName(PCWSTR Namespace, PCWSTR Name)
+{
+    static const BYTE Zero = 0;
+    UINT64 Hash = 14695981039346656037ULL;
+    SIZE_T Index, Length;
+
+    Length = wcslen(Namespace);
+    for (Index = 0; Index < Length; Index++)
+    {
+        Hash ^= (BYTE)Namespace[Index];
+        Hash *= 1099511628211ULL;
+    }
+
+    Hash ^= Zero;
+    Hash *= 1099511628211ULL;
+
+    Length = wcslen(Name);
+    for (Index = 0; Index < Length; Index++)
+    {
+        Hash ^= (BYTE)Name[Index];
+        Hash *= 1099511628211ULL;
+    }
+
+    return Hash;
+}
+
+static BOOL ReadDigits(PCWSTR* PText, ULONG Count, UINT32* PValue)
+{
+    ULONG Index;
+    UINT32 Value = 0;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        if ((*PText)[Index] < L'0' || (*PText)[Index] > L'9')
+            return FALSE;
+        Value = Value * 10 + (UINT32)((*PText)[Index] - L'0');
+    }
+
+    *PText += Count;
+    *PValue = Value;
+
+    return TRUE;
+}
+
+/* the timestamp of a document has no time zone; it is read as a local time
+ * (REQ-FS-007)
+ */
+static BOOL ParseTimestamp(PCWSTR Ts, UINT64* PFileTime)
+{
+    SYSTEMTIME SystemTime = { 0 };
+    FILETIME FileTime;
+    UINT32 Year, Month, Day, Hour, Minute, Second, Milli;
+    PCWSTR Text = Ts;
+
+    if (0 == Ts)
+        return FALSE;
+
+    if (!ReadDigits(&Text, 4, &Year) || L'-' != *Text++)
+        return FALSE;
+    if (!ReadDigits(&Text, 2, &Month) || L'-' != *Text++)
+        return FALSE;
+    if (!ReadDigits(&Text, 2, &Day) || L' ' != *Text++)
+        return FALSE;
+    if (!ReadDigits(&Text, 2, &Hour) || L':' != *Text++)
+        return FALSE;
+    if (!ReadDigits(&Text, 2, &Minute) || L':' != *Text++)
+        return FALSE;
+    if (!ReadDigits(&Text, 2, &Second))
+        return FALSE;
+    if (L'.' == *Text)
+    {
+        Text++;
+        if (!ReadDigits(&Text, 3, &Milli))
+            return FALSE;
+    }
+    else
+    {
+        Milli = 0;
+    }
+
+    if (L'\0' != *Text)
+        return FALSE;
+
+    SystemTime.wYear = (WORD)Year;
+    SystemTime.wMonth = (WORD)Month;
+    SystemTime.wDay = (WORD)Day;
+    SystemTime.wHour = (WORD)Hour;
+    SystemTime.wMinute = (WORD)Minute;
+    SystemTime.wSecond = (WORD)Second;
+    SystemTime.wMilliseconds = (WORD)Milli;
+
+    if (!SystemTimeToFileTime(&SystemTime, &FileTime))
+        return FALSE;
+
+    *PFileTime = (UINT64)((PLARGE_INTEGER)&FileTime)->QuadPart;
+
+    return TRUE;
+}
+
+/* the index of a category in Categories, or -1 */
+static int CategoryIndex(PCWSTR Category)
+{
+    ULONG Index;
+
+    for (Index = 0; Index < CATEGORY_COUNT; Index++)
+        if (0 == _wcsicmp(Category, Categories[Index]))
+            return (int)Index;
+
+    return -1;
 }
 
 /* base64 is needed for the HTTP Basic header; Windows has no plain base64 API
@@ -234,6 +622,69 @@ exit:
     return Header;
 }
 
+/* ------------------------------------------------------------------------
+ * JSON
+ *
+ * The answers of the Atelier API are UTF-8 JSON. They are parsed with cJSON
+ * (MIT, cjson); the strings of the server are converted to UTF-16 for the
+ * WinFsp layer.
+ * ------------------------------------------------------------------------ */
+
+/* converts a UTF-8 text of the server into a UTF-16 string; the result is
+ * allocated and must be freed with free()
+ */
+static PWSTR Utf8ToWide(const char* Utf8)
+{
+    int Length;
+    PWSTR Wide;
+
+    if (0 == Utf8)
+        return 0;
+
+    Length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, Utf8, -1, 0, 0);
+    if (0 == Length)
+        return 0;
+
+    Wide = malloc((SIZE_T)Length * sizeof(WCHAR));
+    if (0 == Wide)
+        return 0;
+
+    if (0 == MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, Utf8, -1, Wide, Length))
+    {
+        free(Wide);
+        return 0;
+    }
+
+    return Wide;
+}
+
+/* parses the answer of the server; the whole text must hold one JSON value,
+ * trailing whitespace is allowed
+ */
+static cJSON* JsonParse(const char* Text, SIZE_T Length)
+{
+    const char* End = 0;
+    cJSON* Root;
+    SIZE_T Index;
+
+    Root = cJSON_ParseWithLengthOpts(Text, Length, &End, 0);
+    if (0 == Root)
+        return 0;
+
+    for (Index = (SIZE_T)(End - Text); Index < Length; Index++)
+    {
+        char Ch = Text[Index];
+
+        if (' ' != Ch && '\t' != Ch && '\r' != Ch && '\n' != Ch)
+        {
+            cJSON_Delete(Root);
+            return 0;
+        }
+    }
+
+    return Root;
+}
+
 static NTSTATUS AtelierTransportError(PCWSTR Endpoint, DWORD Error)
 {
     PCWSTR Reason;
@@ -268,21 +719,16 @@ static NTSTATUS AtelierTransportError(PCWSTR Endpoint, DWORD Error)
     return Result;
 }
 
-/* mount-time probe: GET /:namespace against the -p address with the -ns
- * namespace. Fails the mount when the server is unreachable (REQ-MOUNT-021),
- * rejects the credentials (REQ-MOUNT-012) or does not expose the namespace
- * (REQ-MOUNT-009). The password is only used in the Basic header and
- * never logged (REQ-MOUNT-010).
+/* opens the HTTP client of the mount: one session, the host and the path of
+ * the base URL (REQ-CONN-021, REQ-CONN-003)
  */
-static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
+static NTSTATUS AtelierClientOpen(ATELIER_CLIENT* Client, PCWSTR BaseUrl)
 {
+    URL_COMPONENTS UrlComponents;
     WCHAR HostName[256];
     WCHAR BasePath[1024];
-    URL_COMPONENTS UrlComponents;
-    HINTERNET Session = 0, Connection = 0, Request = 0;
-    PWSTR AuthHeader = 0;
-    DWORD StatusCode = 0, Size;
-    NTSTATUS Result;
+
+    memset(Client, 0, sizeof *Client);
 
     memset(&UrlComponents, 0, sizeof UrlComponents);
     UrlComponents.dwStructSize = sizeof UrlComponents;
@@ -298,41 +744,114 @@ static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* connect to host:port directly, without a proxy */
-    Session = WinHttpOpen(L"" PROGNAME L"/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
+    /* connect to host:port directly, without a proxy (REQ-CONN-019) */
+    Client->Session = WinHttpOpen(L"" PROGNAME L"/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (0 == Session)
+    if (0 == Client->Session)
     {
         fail(L"cannot connect to %s: cannot initialize HTTP client (Win32 error %lu)",
             BaseUrl, GetLastError());
-        Result = STATUS_INSUFFICIENT_RESOURCES;
-        goto exit;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* failure to set a timeout is not fatal, the defaults apply */
-    WinHttpSetTimeouts(Session, ATELIER_TIMEOUT_MS, ATELIER_TIMEOUT_MS,
+    WinHttpSetTimeouts(Client->Session, ATELIER_TIMEOUT_MS, ATELIER_TIMEOUT_MS,
         ATELIER_TIMEOUT_MS, ATELIER_TIMEOUT_MS);
 
-    Connection = WinHttpConnect(Session, HostName, UrlComponents.nPort, 0);
+    wcscpy_s(Client->HostName, ARRAYSIZE(Client->HostName), HostName);
+    wcscpy_s(Client->BasePath, ARRAYSIZE(Client->BasePath), BasePath);
+    Client->Port = UrlComponents.nPort;
+    Client->Flags = INTERNET_SCHEME_HTTPS == UrlComponents.nScheme ? WINHTTP_FLAG_SECURE : 0;
+
+    return STATUS_SUCCESS;
+}
+
+static VOID AtelierClientClose(ATELIER_CLIENT* Client)
+{
+    if (0 != Client->Session)
+        WinHttpCloseHandle(Client->Session);
+
+    Client->Session = 0;
+}
+
+/* the HTTP status of the server becomes an NTSTATUS (overview §7) */
+static NTSTATUS AtelierStatusToNtStatus(DWORD StatusCode)
+{
+    switch (StatusCode)
+    {
+    case 200:
+    case 201:
+    case 202:
+    case 304:
+        return STATUS_SUCCESS;
+    case 400:
+        return STATUS_OBJECT_NAME_INVALID;
+    case 401:
+        return STATUS_ACCESS_DENIED;
+    case 403:
+        return STATUS_ACCESS_DENIED;
+    case 404:
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    case 409:
+        return STATUS_FILE_LOCK_CONFLICT;
+    case 415:
+        return STATUS_INVALID_PARAMETER;
+    case 423:
+    case 425:
+        return STATUS_FILE_LOCK_CONFLICT;
+    case 429:
+        return STATUS_NETWORK_BUSY;
+    case 500:
+        return STATUS_UNEXPECTED_IO_ERROR;
+    case 502:
+    case 503:
+        return STATUS_NETWORK_UNREACHABLE;
+    case 504:
+        return STATUS_IO_TIMEOUT;
+    default:
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+}
+
+/* issues one request against the Atelier server and reads the answer; every
+ * request carries the credentials of the mount (REQ-CONN-006, REQ-CONN-009)
+ */
+static NTSTATUS AtelierRequest(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password,
+    PCWSTR Method, PCWSTR Path, PBYTE* PResponse, DWORD* PResponseLength, DWORD* PStatusCode)
+{
+    HINTERNET Connection = 0, Request = 0;
+    PWSTR AuthHeader = 0;
+    WCHAR FullPath[2048];
+    PBYTE Response = 0;
+    DWORD Total = 0;
+    NTSTATUS Result;
+
+    *PResponse = 0;
+    *PResponseLength = 0;
+    *PStatusCode = 0;
+
+    if (FAILED(StringCchPrintfW(FullPath, ARRAYSIZE(FullPath), L"%s%s", Client->BasePath, Path)))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    Connection = WinHttpConnect(Client->Session, Client->HostName, Client->Port, 0);
     if (0 == Connection)
     {
-        Result = AtelierTransportError(BaseUrl, GetLastError());
+        Result = AtelierTransportError(FullPath, GetLastError());
         goto exit;
     }
 
-    Request = WinHttpOpenRequest(Connection, L"GET", BasePath, 0,
-        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        INTERNET_SCHEME_HTTPS == UrlComponents.nScheme ? WINHTTP_FLAG_SECURE : 0);
+    Request = WinHttpOpenRequest(Connection, Method, FullPath, 0,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, Client->Flags);
     if (0 == Request)
     {
-        Result = AtelierTransportError(BaseUrl, GetLastError());
+        Result = AtelierTransportError(FullPath, GetLastError());
         goto exit;
     }
 
     AuthHeader = BasicAuthHeader(UserName, Password);
     if (0 == AuthHeader)
     {
-        fail(L"cannot connect to %s: cannot build credentials", BaseUrl);
+        fail(L"cannot connect to %s: cannot build credentials", FullPath);
         Result = STATUS_INSUFFICIENT_RESOURCES;
         goto exit;
     }
@@ -343,51 +862,66 @@ static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
             WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(Request, 0))
     {
-        Result = AtelierTransportError(BaseUrl, GetLastError());
+        Result = AtelierTransportError(FullPath, GetLastError());
         goto exit;
     }
 
-    Size = sizeof StatusCode;
-    if (!WinHttpQueryHeaders(Request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX, &StatusCode, &Size, WINHTTP_NO_HEADER_INDEX))
     {
-        Result = AtelierTransportError(BaseUrl, GetLastError());
-        goto exit;
+        DWORD Size = sizeof *PStatusCode;
+
+        if (!WinHttpQueryHeaders(Request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, PStatusCode, &Size, WINHTTP_NO_HEADER_INDEX))
+        {
+            Result = AtelierTransportError(FullPath, GetLastError());
+            goto exit;
+        }
     }
 
-    if (StatusCode >= 200 && StatusCode < 300)
+    for (;;)
     {
-        info(L"connected to Atelier server at %s (HTTP %lu)", BaseUrl, StatusCode);
-        Result = STATUS_SUCCESS;
+        DWORD Available = 0, Read = 0;
+
+        if (!WinHttpQueryDataAvailable(Request, &Available))
+        {
+            Result = AtelierTransportError(FullPath, GetLastError());
+            goto exit;
+        }
+        if (0 == Available)
+            break;
+
+        if (Total + Available > ATELIER_MAX_RESPONSE_SIZE)
+        {
+            fail(L"cannot read the answer of %s: it is too large", FullPath);
+            Result = STATUS_INVALID_BUFFER_SIZE;
+            goto exit;
+        }
+
+        {
+            PBYTE Buffer = realloc(Response, Total + Available + 1);
+
+            if (0 == Buffer)
+            {
+                Result = STATUS_INSUFFICIENT_RESOURCES;
+                goto exit;
+            }
+            Response = Buffer;
+        }
+
+        if (!WinHttpReadData(Request, Response + Total, Available, &Read))
+        {
+            Result = AtelierTransportError(FullPath, GetLastError());
+            goto exit;
+        }
+        Total += Read;
     }
-    else if (401 == StatusCode)
-    {
-        fail(L"cannot connect to %s: authentication failed (HTTP 401); "
-            L"check -user and -pass", BaseUrl);
-        Result = STATUS_LOGON_FAILURE;
-    }
-    else if (403 == StatusCode)
-    {
-        fail(L"cannot connect to %s: access denied (HTTP 403); "
-            L"the account may not use the Atelier API", BaseUrl);
-        Result = STATUS_ACCESS_DENIED;
-    }
-    else if (404 == StatusCode)
-    {
-        fail(L"cannot connect to %s: namespace not found (HTTP 404); "
-            L"check -ns and that the account may access the namespace", BaseUrl);
-        Result = STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-    else if (StatusCode >= 500)
-    {
-        fail(L"cannot connect to %s: server error (HTTP %lu)", BaseUrl, StatusCode);
-        Result = STATUS_UNEXPECTED_IO_ERROR;
-    }
-    else
-    {
-        fail(L"cannot connect to %s: unexpected response (HTTP %lu)", BaseUrl, StatusCode);
-        Result = STATUS_UNSUCCESSFUL;
-    }
+
+    if (0 != Response)
+        Response[Total] = 0;
+
+    *PResponse = Response;
+    *PResponseLength = Total;
+    Response = 0;
+    Result = STATUS_SUCCESS;
 
 exit:
     if (0 != AuthHeader)
@@ -399,8 +933,760 @@ exit:
         WinHttpCloseHandle(Request);
     if (0 != Connection)
         WinHttpCloseHandle(Connection);
-    if (0 != Session)
-        WinHttpCloseHandle(Session);
+    free(Response);
+
+    return Result;
+}
+
+/* mount-time probe: GET /:namespace against the -p address with the -ns
+ * namespace. Fails the mount when the server is unreachable (REQ-MOUNT-021),
+ * rejects the credentials (REQ-MOUNT-012) or does not expose the namespace
+ * (REQ-MOUNT-009). The password is only used in the Basic header and
+ * never logged (REQ-MOUNT-010).
+ */
+static NTSTATUS AtelierProbe(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password)
+{
+    PBYTE Response = 0;
+    DWORD ResponseLength = 0, StatusCode = 0;
+    NTSTATUS Result;
+
+    Result = AtelierRequest(Client, UserName, Password, L"GET", L"", &Response, &ResponseLength, &StatusCode);
+    if (!NT_SUCCESS(Result))
+    {
+        /* the transport error was already reported */
+        return Result;
+    }
+
+    free(Response);
+
+    if (StatusCode >= 200 && StatusCode < 300)
+    {
+        info(L"connected to Atelier server at %s (HTTP %lu)", Client->BasePath, StatusCode);
+        Result = STATUS_SUCCESS;
+    }
+    else if (401 == StatusCode)
+    {
+        fail(L"cannot connect to %s: authentication failed (HTTP 401); "
+            L"check -user and -pass", Client->BasePath);
+        Result = STATUS_LOGON_FAILURE;
+    }
+    else if (403 == StatusCode)
+    {
+        fail(L"cannot connect to %s: access denied (HTTP 403); "
+            L"the account may not use the Atelier API", Client->BasePath);
+        Result = STATUS_ACCESS_DENIED;
+    }
+    else if (404 == StatusCode)
+    {
+        fail(L"cannot connect to %s: namespace not found (HTTP 404); "
+            L"check -ns and that the account may access the namespace", Client->BasePath);
+        Result = STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    else if (StatusCode >= 500)
+    {
+        fail(L"cannot connect to %s: server error (HTTP %lu)", Client->BasePath, StatusCode);
+        Result = STATUS_UNEXPECTED_IO_ERROR;
+    }
+    else
+    {
+        fail(L"cannot connect to %s: unexpected response (HTTP %lu)", Client->BasePath, StatusCode);
+        Result = STATUS_UNSUCCESSFUL;
+    }
+
+    return Result;
+}
+
+/* ------------------------------------------------------------------------
+ * The document descriptors of a category
+ * ------------------------------------------------------------------------ */
+
+static VOID FreeDescriptors(PTFS_DESCRIPTOR* Descriptors, ULONG Count)
+{
+    ULONG Index;
+
+    if (0 == Descriptors)
+        return;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        free(Descriptors[Index].Name);
+        free(Descriptors[Index].Category);
+        free(Descriptors[Index].Db);
+        free(Descriptors[Index].Ts);
+    }
+
+    free(Descriptors);
+}
+
+static NTSTATUS CopyDescriptors(const PTFS_DESCRIPTOR* Descriptors, ULONG Count,
+    PTFS_DESCRIPTOR** PDescriptors, ULONG* PCount)
+{
+    PTFS_DESCRIPTOR* Copy;
+    ULONG Index;
+
+    *PDescriptors = 0;
+    *PCount = 0;
+
+    Copy = malloc((Count ? Count : 1) * sizeof *Copy);
+    if (0 == Copy)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    memset(Copy, 0, (Count ? Count : 1) * sizeof *Copy);
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        Copy[Index].Name = DupString(Descriptors[Index].Name);
+        Copy[Index].Category = DupString(Descriptors[Index].Category);
+        Copy[Index].Db = DupString(Descriptors[Index].Db);
+        Copy[Index].Ts = DupString(Descriptors[Index].Ts);
+        Copy[Index].Generated = Descriptors[Index].Generated;
+
+        if ((0 != Descriptors[Index].Name && 0 == Copy[Index].Name) ||
+            (0 != Descriptors[Index].Category && 0 == Copy[Index].Category) ||
+            (0 != Descriptors[Index].Db && 0 == Copy[Index].Db) ||
+            (0 != Descriptors[Index].Ts && 0 == Copy[Index].Ts))
+        {
+            FreeDescriptors(Copy, Index);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    *PDescriptors = Copy;
+    *PCount = Count;
+
+    return STATUS_SUCCESS;
+}
+
+/* reads the document descriptors of a category from the answer of the server
+ * (api.md §8.2.1)
+ */
+static NTSTATUS ParseCategoryListing(PBYTE Response, DWORD ResponseLength, PCWSTR Category,
+    PTFS_DESCRIPTOR** PDescriptors, ULONG* PCount)
+{
+    cJSON* Root = 0;
+    const cJSON* Status;
+    const cJSON* Errors;
+    const cJSON* Result;
+    const cJSON* Content;
+    PTFS_DESCRIPTOR* Descriptors = 0;
+    ULONG Count = 0, Index;
+
+    *PDescriptors = 0;
+    *PCount = 0;
+
+    Root = JsonParse((const char*)Response, ResponseLength);
+    if (0 == Root)
+    {
+        fail(L"cannot list the documents of %s: the answer of the server is not valid JSON", Category);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
+    /* the request level errors are reported even when the status is 200 (api.md §3) */
+    Status = cJSON_GetObjectItemCaseSensitive(Root, "status");
+    Errors = cJSON_GetObjectItemCaseSensitive(Status, "errors");
+    if (0 != Errors && cJSON_IsArray(Errors) && 0 != cJSON_GetArraySize(Errors))
+    {
+        warn(L"the server reported %d error(s) while the documents of %s were listed",
+            cJSON_GetArraySize(Errors), Category);
+    }
+
+    Result = cJSON_GetObjectItemCaseSensitive(Root, "result");
+    Content = cJSON_GetObjectItemCaseSensitive(Result, "content");
+    if (0 == Content || !cJSON_IsArray(Content))
+    {
+        cJSON_Delete(Root);
+        fail(L"cannot list the documents of %s: the answer of the server has no content array", Category);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
+    Count = (ULONG)cJSON_GetArraySize(Content);
+    Descriptors = malloc((Count ? Count : 1) * sizeof *Descriptors);
+    if (0 == Descriptors)
+    {
+        cJSON_Delete(Root);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    memset(Descriptors, 0, (Count ? Count : 1) * sizeof *Descriptors);
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        const cJSON* Item = cJSON_GetArrayItem(Content, (int)Index);
+        const cJSON* Name = cJSON_GetObjectItemCaseSensitive(Item, "name");
+
+        if (!cJSON_IsString(Name))
+        {
+            warn(L"the server listed a document of %s without a name; it is ignored", Category);
+            continue;
+        }
+
+        Descriptors[Index].Name = Utf8ToWide(cJSON_GetStringValue(Name));
+        Descriptors[Index].Category = Utf8ToWide(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(Item, "cat")));
+        Descriptors[Index].Db = Utf8ToWide(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(Item, "db")));
+        Descriptors[Index].Ts = Utf8ToWide(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(Item, "ts")));
+        Descriptors[Index].Generated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(Item, "gen"));
+
+        if (0 == Descriptors[Index].Name)
+        {
+            FreeDescriptors(Descriptors, Index);
+            cJSON_Delete(Root);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    cJSON_Delete(Root);
+
+    *PDescriptors = Descriptors;
+    *PCount = Count;
+
+    return STATUS_SUCCESS;
+}
+
+/* the descriptors of a category, from the cache when the cache is valid
+ * (overview §8, REQ-FS-001)
+ */
+static NTSTATUS GetCategoryDescriptors(PTFS* Ptfs, PCWSTR Category,
+    PTFS_DESCRIPTOR** PDescriptors, ULONG* PCount)
+{
+    PTFS_CATEGORY_CACHE* Cache;
+    WCHAR Path[64];
+    PBYTE Response = 0;
+    DWORD ResponseLength = 0, StatusCode = 0;
+    PTFS_DESCRIPTOR* Descriptors = 0;
+    ULONG Count = 0;
+    NTSTATUS Result;
+    int Index;
+
+    *PDescriptors = 0;
+    *PCount = 0;
+
+    Index = CategoryIndex(Category);
+    if (Index < 0)
+        return STATUS_OBJECT_NAME_INVALID;
+
+    Cache = &Ptfs->Cache[Index];
+
+    /* one enumeration of a category at a time, so that a listing is not
+     * requested twice for the same category (overview §9)
+     */
+    EnterCriticalSection(&Cache->Lock);
+
+    if (Cache->Valid && GetTickCount64() < Cache->Expires)
+    {
+        Result = CopyDescriptors(Cache->Descriptors, Cache->Count, PDescriptors, PCount);
+        LeaveCriticalSection(&Cache->Lock);
+        return Result;
+    }
+
+    if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"/docnames/%s", Categories[Index])))
+    {
+        LeaveCriticalSection(&Cache->Lock);
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    Result = AtelierRequest(&Ptfs->Client, Ptfs->UserName, Ptfs->Password, L"GET", Path,
+        &Response, &ResponseLength, &StatusCode);
+    if (!NT_SUCCESS(Result))
+    {
+        LeaveCriticalSection(&Cache->Lock);
+        return Result;
+    }
+
+    if (StatusCode < 200 || StatusCode >= 300)
+    {
+        fail(L"cannot list the documents of %s: the server answered HTTP %lu",
+            Categories[Index], StatusCode);
+        free(Response);
+        LeaveCriticalSection(&Cache->Lock);
+        return AtelierStatusToNtStatus(StatusCode);
+    }
+
+    Result = ParseCategoryListing(Response, ResponseLength, Categories[Index], &Descriptors, &Count);
+    free(Response);
+    if (!NT_SUCCESS(Result))
+    {
+        LeaveCriticalSection(&Cache->Lock);
+        return Result;
+    }
+
+    info(L"listed %lu document(s) of %s", Count, Categories[Index]);
+
+    FreeDescriptors(Cache->Descriptors, Cache->Count);
+    Cache->Descriptors = Descriptors;
+    Cache->Count = Count;
+    Cache->Valid = TRUE;
+    Cache->Expires = GetTickCount64() + DESCRIPTOR_CACHE_TTL_MS;
+
+    Result = CopyDescriptors(Cache->Descriptors, Cache->Count, PDescriptors, PCount);
+
+    LeaveCriticalSection(&Cache->Lock);
+
+    return Result;
+}
+
+/* ------------------------------------------------------------------------
+ * The entries of a directory
+ * ------------------------------------------------------------------------ */
+
+typedef struct
+{
+    PWSTR Name;         /* the name of the entry in the directory */
+    PWSTR PathName;     /* the dotted path of a package level */
+    PWSTR DocumentName; /* the dotted name of a document */
+    BOOLEAN IsDirectory;
+    UINT64 Timestamp;   /* the timestamp of the newest document below the entry */
+    UINT64 IndexNumber;
+} PTFS_DIR_ENTRY;
+
+static VOID FreeDirEntries(PTFS_DIR_ENTRY* Entries, ULONG Count)
+{
+    ULONG Index;
+
+    if (0 == Entries)
+        return;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        free(Entries[Index].Name);
+        free(Entries[Index].PathName);
+        free(Entries[Index].DocumentName);
+    }
+
+    free(Entries);
+}
+
+/* adds an entry to a directory; the entries of several documents of one
+ * package level are one entry (REQ-MAP-007)
+ */
+static NTSTATUS AddDirEntry(PTFS_DIR_ENTRY** PEntries, ULONG* PCount, ULONG* PCapacity,
+    PCWSTR Name, BOOLEAN IsDirectory, PCWSTR DocumentName, PCWSTR PathName, UINT64 Timestamp)
+{
+    ULONG Index;
+    PTFS_DIR_ENTRY* Entry;
+
+    for (Index = 0; Index < *PCount; Index++)
+    {
+        Entry = &(*PEntries)[Index];
+
+        if (0 != _wcsicmp(Entry->Name, Name))
+            continue;
+
+        if (Entry->IsDirectory && IsDirectory)
+        {
+            /* the same package level: the newest timestamp wins */
+            if (Timestamp > Entry->Timestamp)
+                Entry->Timestamp = Timestamp;
+            return STATUS_SUCCESS;
+        }
+
+        /* a document and a package level with the same name cannot both be
+         * exposed; the first one wins
+         */
+        warn(L"%s is listed twice and is exposed only once", Name);
+
+        return STATUS_SUCCESS;
+    }
+
+    if (*PCount == *PCapacity)
+    {
+        ULONG Capacity = *PCapacity ? *PCapacity * 2 : 16;
+        PTFS_DIR_ENTRY* Entries = realloc(*PEntries, Capacity * sizeof *Entries);
+
+        if (0 == Entries)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        memset(Entries + *PCount, 0, (Capacity - *PCount) * sizeof *Entries);
+        *PEntries = Entries;
+        *PCapacity = Capacity;
+    }
+
+    Entry = &(*PEntries)[(*PCount)++];
+    memset(Entry, 0, sizeof *Entry);
+    Entry->Name = DupString(Name);
+    Entry->DocumentName = DupString(DocumentName);
+    Entry->PathName = DupString(PathName);
+    Entry->IsDirectory = IsDirectory;
+    Entry->Timestamp = Timestamp;
+
+    if (0 == Entry->Name || (0 != DocumentName && 0 == Entry->DocumentName) ||
+        (0 != PathName && 0 == Entry->PathName))
+    {
+        free(Entry->Name);
+        free(Entry->DocumentName);
+        free(Entry->PathName);
+        memset(Entry, 0, sizeof *Entry);
+        (*PCount)--;
+
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* the entries of a category directory or of a package level; a package level
+ * is served from the listing of its category, filtered by the prefix
+ * (REQ-FS-001, REQ-MAP-008)
+ */
+static NTSTATUS BuildCategoryEntries(PTFS* Ptfs, PCWSTR Category, PCWSTR Prefix,
+    PTFS_DIR_ENTRY** PEntries, ULONG* PCount)
+{
+    PTFS_DESCRIPTOR* Descriptors = 0;
+    ULONG DescriptorCount = 0, Index;
+    PWSTR* PrefixSegments = 0;
+    ULONG PrefixCount = 0;
+    PWSTR* Accepted = 0;
+    ULONG AcceptedCount = 0, AcceptedCapacity = 0;
+    PWSTR CanonicalPrefix = 0;
+    PTFS_DIR_ENTRY* Entries = 0;
+    ULONG EntryCount = 0, EntryCapacity = 0;
+    NTSTATUS Result;
+
+    *PEntries = 0;
+    *PCount = 0;
+
+    if (0 != Prefix && L'\0' != *Prefix)
+        PrefixCount = SplitByDelimiter(Prefix, L'.', 0, &PrefixSegments);
+
+    Result = GetCategoryDescriptors(Ptfs, Category, &Descriptors, &DescriptorCount);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    for (Index = 0; Index < DescriptorCount; Index++)
+    {
+        PTFS_DESCRIPTOR* Descriptor = &Descriptors[Index];
+        PWSTR* Segments = 0;
+        ULONG SegmentCount, SegmentIndex;
+        ULONG PackageCount;
+        BOOLEAN Skip = FALSE, Match = TRUE;
+        UINT64 Timestamp = 0;
+
+        /* the generated documents are not exposed (REQ-FS-002, REQ-MAP-011) */
+        if (Descriptor->Generated)
+            continue;
+
+        /* two documents that differ only by case: the first one is exposed
+         * (REQ-MAP-010)
+         */
+        for (SegmentIndex = 0; SegmentIndex < AcceptedCount; SegmentIndex++)
+            if (0 == _wcsicmp(Accepted[SegmentIndex], Descriptor->Name))
+            {
+                warn(L"%s: the document %s is hidden, because %s differs from it only by case",
+                    Category, Descriptor->Name, Accepted[SegmentIndex]);
+                Skip = TRUE;
+                break;
+            }
+        if (Skip)
+            continue;
+
+        if (AcceptedCount == AcceptedCapacity)
+        {
+            ULONG Capacity = AcceptedCapacity ? AcceptedCapacity * 2 : 32;
+            PWSTR* Names = realloc(Accepted, Capacity * sizeof *Names);
+
+            if (0 == Names)
+            {
+                Result = STATUS_INSUFFICIENT_RESOURCES;
+                goto exit;
+            }
+            Accepted = Names;
+            AcceptedCapacity = Capacity;
+        }
+        Accepted[AcceptedCount] = Descriptor->Name;
+        AcceptedCount++;
+
+        SegmentCount = SplitDocumentName(Descriptor->Name, &Segments);
+        if (0 == SegmentCount)
+            continue;
+
+        /* every segment must be a legal name of a path segment (REQ-MAP-013) */
+        for (SegmentIndex = 0; SegmentIndex < SegmentCount; SegmentIndex++)
+        {
+            if (!IsLegalPathSegment(Segments[SegmentIndex]))
+            {
+                warn(L"%s: the document %s is not exposed, because %s is not a legal file name",
+                    Category, Descriptor->Name, Segments[SegmentIndex]);
+                Skip = TRUE;
+                break;
+            }
+        }
+        if (Skip)
+        {
+            FreeSegments(Segments, SegmentCount);
+            continue;
+        }
+
+        /* the package levels of the document are the segments in front of the
+         * file name (REQ-MAP-004)
+         */
+        PackageCount = SegmentCount - 1;
+
+        if (PackageCount < PrefixCount)
+            Match = FALSE;
+        for (SegmentIndex = 0; Match && SegmentIndex < PrefixCount; SegmentIndex++)
+            if (0 != _wcsicmp(Segments[SegmentIndex], PrefixSegments[SegmentIndex]))
+                Match = FALSE;
+
+        if (Match)
+        {
+            ParseTimestamp(Descriptor->Ts, &Timestamp);
+
+            /* the canonical spelling of the package path is the one of the
+             * server, not the one of the request (REQ-FS-004); it is taken
+             * from the first document that matches the prefix
+             */
+            if (0 == CanonicalPrefix)
+            {
+                CanonicalPrefix = JoinDotted(Segments, PrefixCount);
+                if (0 == CanonicalPrefix)
+                {
+                    Result = STATUS_INSUFFICIENT_RESOURCES;
+                    FreeSegments(Segments, SegmentCount);
+                    goto exit;
+                }
+            }
+
+            if (PackageCount == PrefixCount)
+            {
+                /* the document itself */
+                Result = AddDirEntry(&Entries, &EntryCount, &EntryCapacity,
+                    Segments[SegmentCount - 1], FALSE, Descriptor->Name, 0, Timestamp);
+            }
+            else
+            {
+                /* the next package level */
+                WCHAR PathName[2048];
+
+                if (0 == PrefixCount)
+                {
+                    if (FAILED(StringCchCopyW(PathName, ARRAYSIZE(PathName), Segments[PrefixCount])))
+                    {
+                        Result = STATUS_OBJECT_NAME_INVALID;
+                        FreeSegments(Segments, SegmentCount);
+                        goto exit;
+                    }
+                }
+                else
+                {
+                    if (FAILED(StringCchPrintfW(PathName, ARRAYSIZE(PathName), L"%s.%s",
+                        CanonicalPrefix, Segments[PrefixCount])))
+                    {
+                        Result = STATUS_OBJECT_NAME_INVALID;
+                        FreeSegments(Segments, SegmentCount);
+                        goto exit;
+                    }
+                }
+
+                Result = AddDirEntry(&Entries, &EntryCount, &EntryCapacity,
+                    Segments[PrefixCount], TRUE, 0, PathName, Timestamp);
+            }
+
+            if (!NT_SUCCESS(Result))
+            {
+                FreeSegments(Segments, SegmentCount);
+                goto exit;
+            }
+        }
+
+        FreeSegments(Segments, SegmentCount);
+    }
+
+    /* the index number of an entry is derived from its name (REQ-FS-012) */
+    for (Index = 0; Index < EntryCount; Index++)
+    {
+        if (Entries[Index].IsDirectory)
+            Entries[Index].IndexNumber = HashEntryName(Ptfs->Namespace, Entries[Index].PathName);
+        else
+            Entries[Index].IndexNumber = HashEntryName(Ptfs->Namespace, Entries[Index].DocumentName);
+    }
+
+    *PEntries = Entries;
+    *PCount = EntryCount;
+    Entries = 0;
+    EntryCount = 0;
+
+exit:
+    FreeDirEntries(Entries, EntryCount);
+    FreeDescriptors(Descriptors, DescriptorCount);
+    if (0 != Accepted)
+        free(Accepted);
+    if (0 != PrefixSegments)
+        FreeSegments(PrefixSegments, PrefixCount);
+    if (0 != CanonicalPrefix)
+        free(CanonicalPrefix);
+
+    return Result;
+}
+
+/* ------------------------------------------------------------------------
+ * The resolution of a path
+ * ------------------------------------------------------------------------ */
+
+typedef enum
+{
+    VOLUME_PATH_ROOT,     /* the root of the volume */
+    VOLUME_PATH_CATEGORY, /* a category directory, e.g. "\CLS" */
+    VOLUME_PATH_PACKAGE,  /* a package level, e.g. "\CLS\User" */
+    VOLUME_PATH_DOCUMENT, /* a document, e.g. "\CLS\User\Person.cls" */
+    VOLUME_PATH_INVALID
+} VOLUME_PATH_KIND;
+
+typedef struct
+{
+    VOLUME_PATH_KIND Kind;
+    PWSTR Category;      /* the category of the path */
+    PWSTR PackagePrefix; /* the dotted path of a package level */
+    PWSTR DocumentName;  /* the dotted name of a document */
+} VOLUME_PATH;
+
+static VOID VolumePathFree(VOLUME_PATH* Path)
+{
+    free(Path->Category);
+    free(Path->PackagePrefix);
+    free(Path->DocumentName);
+    memset(Path, 0, sizeof *Path);
+}
+
+/* resolves a path below a category against the listing of the category
+ * (REQ-MAP-015)
+ */
+static NTSTATUS ResolveCategoryPath(PTFS* Ptfs, PCWSTR Category, PWSTR* Segments, ULONG Count,
+    VOLUME_PATH* Path)
+{
+    PTFS_DESCRIPTOR* Descriptors = 0;
+    ULONG DescriptorCount = 0, Index;
+    NTSTATUS Result;
+
+    Result = GetCategoryDescriptors(Ptfs, Category, &Descriptors, &DescriptorCount);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    for (Index = 0; Index < DescriptorCount; Index++)
+    {
+        PWSTR* DocumentSegments = 0;
+        ULONG DocumentSegmentCount, SegmentIndex;
+        ULONG PackageCount;
+        BOOLEAN Match = TRUE;
+
+        if (Descriptors[Index].Generated)
+            continue;
+
+        DocumentSegmentCount = SplitDocumentName(Descriptors[Index].Name, &DocumentSegments);
+        if (0 == DocumentSegmentCount)
+            continue;
+
+        /* a document whose name cannot be represented is not exposed and
+         * resolves to nothing (REQ-MAP-013)
+         */
+        for (SegmentIndex = 0; SegmentIndex < DocumentSegmentCount; SegmentIndex++)
+            if (!IsLegalPathSegment(DocumentSegments[SegmentIndex]))
+                break;
+        if (SegmentIndex < DocumentSegmentCount)
+        {
+            FreeSegments(DocumentSegments, DocumentSegmentCount);
+            continue;
+        }
+
+        PackageCount = DocumentSegmentCount - 1;
+
+        /* the path is a package level, when a document of the category has it
+         * as the beginning of its package path (REQ-MAP-007)
+         */
+        if (PackageCount >= Count)
+        {
+            for (SegmentIndex = 0; SegmentIndex < Count; SegmentIndex++)
+                if (0 != _wcsicmp(DocumentSegments[SegmentIndex], Segments[SegmentIndex]))
+                {
+                    Match = FALSE;
+                    break;
+                }
+            if (Match)
+            {
+                Path->Kind = VOLUME_PATH_PACKAGE;
+                /* the canonical spelling of the level is the one of the
+                 * server, not the one of the request (REQ-FS-004)
+                 */
+                Path->PackagePrefix = JoinDotted(DocumentSegments, Count);
+                FreeSegments(DocumentSegments, DocumentSegmentCount);
+                FreeDescriptors(Descriptors, DescriptorCount);
+                return STATUS_SUCCESS;
+            }
+        }
+
+        /* the path is a document */
+        Match = (PackageCount == Count - 1);
+        for (SegmentIndex = 0; Match && SegmentIndex + 1 < Count; SegmentIndex++)
+            if (0 != _wcsicmp(DocumentSegments[SegmentIndex], Segments[SegmentIndex]))
+                Match = FALSE;
+        if (Match && 0 == _wcsicmp(DocumentSegments[DocumentSegmentCount - 1], Segments[Count - 1]))
+        {
+            Path->Kind = VOLUME_PATH_DOCUMENT;
+            Path->DocumentName = DupString(Descriptors[Index].Name);
+            FreeSegments(DocumentSegments, DocumentSegmentCount);
+            FreeDescriptors(Descriptors, DescriptorCount);
+            return STATUS_SUCCESS;
+        }
+
+        FreeSegments(DocumentSegments, DocumentSegmentCount);
+    }
+
+    FreeDescriptors(Descriptors, DescriptorCount);
+
+    Path->Kind = VOLUME_PATH_INVALID;
+
+    return STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
+/* resolves a path of the volume: the root, a category, a package level or a
+ * document (overview §3, REQ-MAP-015)
+ */
+static NTSTATUS ResolveVolumePath(PTFS* Ptfs, PCWSTR FileName, VOLUME_PATH* Path)
+{
+    PWSTR* Segments = 0;
+    ULONG Count;
+    int Index;
+    NTSTATUS Result;
+
+    memset(Path, 0, sizeof *Path);
+
+    if (IsRootFileName(FileName))
+    {
+        Path->Kind = VOLUME_PATH_ROOT;
+        return STATUS_SUCCESS;
+    }
+
+    Count = SplitByDelimiter(FileName, L'\\', L'/', &Segments);
+    if (0 == Count)
+    {
+        Path->Kind = VOLUME_PATH_INVALID;
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    /* the first segment of a path is the category of the document
+     * (REQ-MAP-003)
+     */
+    Index = CategoryIndex(Segments[0]);
+    if (Index < 0)
+    {
+        FreeSegments(Segments, Count);
+        Path->Kind = VOLUME_PATH_INVALID;
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    Path->Category = DupString(Categories[Index]);
+    if (0 == Path->Category)
+    {
+        FreeSegments(Segments, Count);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (1 == Count)
+    {
+        Path->Kind = VOLUME_PATH_CATEGORY;
+        FreeSegments(Segments, Count);
+        return STATUS_SUCCESS;
+    }
+
+    Result = ResolveCategoryPath(Ptfs, Path->Category, Segments + 1, Count - 1, Path);
+
+    FreeSegments(Segments, Count);
 
     return Result;
 }
@@ -511,7 +1797,6 @@ static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* FileSystem,
     PWSTR FileName, PUINT32 PFileAttributes,
     PSECURITY_DESCRIPTOR SecurityDescriptor, SIZE_T* PSecurityDescriptorSize)
 {
-    static PCWSTR Categories[] = { L"CLS", L"CSP", L"RTN", L"OTH" };
     PCWSTR Name, End;
     ULONG Index;
     NTSTATUS Result;
@@ -553,61 +1838,22 @@ static NTSTATUS Create(FSP_FILE_SYSTEM* FileSystem,
     UINT32 FileAttributes, PSECURITY_DESCRIPTOR SecurityDescriptor, UINT64 AllocationSize,
     PVOID* PFileContext, FSP_FSCTL_FILE_INFO* FileInfo)
 {
-    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
-    WCHAR FullPath[FULLPATH_SIZE];
-    SECURITY_ATTRIBUTES SecurityAttributes;
-    ULONG CreateFlags;
-    PTFS_FILE_CONTEXT* FileContext;
-
     /* the namespace root already exists and cannot be created (REQ-MAP-001) */
     if (IsRootFileName(FileName))
         return STATUS_OBJECT_NAME_COLLISION;
 
-    if (!ConcatPath(Ptfs, FileName, FullPath))
-        return STATUS_OBJECT_NAME_INVALID;
-
-    FileContext = malloc(sizeof * FileContext);
-    if (0 == FileContext)
-        return STATUS_INSUFFICIENT_RESOURCES;
-    memset(FileContext, 0, sizeof * FileContext);
-
-    SecurityAttributes.nLength = sizeof SecurityAttributes;
-    SecurityAttributes.lpSecurityDescriptor = SecurityDescriptor;
-    SecurityAttributes.bInheritHandle = FALSE;
-
-    CreateFlags = FILE_FLAG_BACKUP_SEMANTICS;
-    if (CreateOptions & FILE_DELETE_ON_CLOSE)
-        CreateFlags |= FILE_FLAG_DELETE_ON_CLOSE;
-
+    /* the directories of the volume are synthetic and read-only: they cannot
+     * be created (REQ-FS-037)
+     */
     if (CreateOptions & FILE_DIRECTORY_FILE)
-    {
-        /*
-         * It is not widely known but CreateFileW can be used to create directories!
-         * It requires the specification of both FILE_FLAG_BACKUP_SEMANTICS and
-         * FILE_FLAG_POSIX_SEMANTICS. It also requires that FileAttributes has
-         * FILE_ATTRIBUTE_DIRECTORY set.
-         */
-        CreateFlags |= FILE_FLAG_POSIX_SEMANTICS;
-        FileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
-    }
-    else
-        FileAttributes &= ~FILE_ATTRIBUTE_DIRECTORY;
+        return STATUS_NOT_SUPPORTED;
 
-    if (0 == FileAttributes)
-        FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    /* a document is created on the server by the flush of its handle; the
+     * write of a document is not implemented yet (REQ-FS-018)
+     */
+    warn(L"the document %s cannot be created yet", FileName);
 
-    FileContext->Handle = CreateFileW(FullPath,
-        GrantedAccess, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &SecurityAttributes,
-        CREATE_NEW, CreateFlags | FileAttributes, 0);
-    if (INVALID_HANDLE_VALUE == FileContext->Handle)
-    {
-        free(FileContext);
-        return FspNtStatusFromWin32(GetLastError());
-    }
-
-    *PFileContext = FileContext;
-
-    return GetFileInfoInternal(FileContext->Handle, FileInfo);
+    return STATUS_NOT_SUPPORTED;
 }
 
 static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
@@ -615,9 +1861,9 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
     PVOID* PFileContext, FSP_FSCTL_FILE_INFO* FileInfo)
 {
     PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
-    WCHAR FullPath[FULLPATH_SIZE];
-    ULONG CreateFlags;
     PTFS_FILE_CONTEXT* FileContext;
+    VOLUME_PATH Path;
+    NTSTATUS Result;
 
     /* the root is a synthetic directory backed by the -ns namespace, not by
      * a local path (REQ-MAP-001)
@@ -629,37 +1875,60 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
             return STATUS_INSUFFICIENT_RESOURCES;
         memset(FileContext, 0, sizeof * FileContext);
         FileContext->IsRoot = TRUE;
+        FileContext->IsSynthetic = TRUE;
         FileContext->Handle = INVALID_HANDLE_VALUE;
 
         *PFileContext = FileContext;
 
-        return GetSyntheticDirInfo(FileInfo);
+        return GetSyntheticDirInfo(FileInfo, HashEntryName(Ptfs->Namespace, L""), 0);
     }
 
-    if (!ConcatPath(Ptfs, FileName, FullPath))
-        return STATUS_OBJECT_NAME_INVALID;
+    /* the path is resolved against the listing of its category (REQ-MAP-015) */
+    Result = ResolveVolumePath(Ptfs, FileName, &Path);
+    if (!NT_SUCCESS(Result))
+    {
+        VolumePathFree(&Path);
+        return NT_SUCCESS(Result) ? STATUS_OBJECT_NAME_NOT_FOUND : Result;
+    }
+
+    if (VOLUME_PATH_DOCUMENT == Path.Kind)
+    {
+        /* the content of a document is not read yet */
+        warn(L"the document %s cannot be opened yet", Path.DocumentName);
+        VolumePathFree(&Path);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    if (VOLUME_PATH_CATEGORY != Path.Kind && VOLUME_PATH_PACKAGE != Path.Kind)
+    {
+        VolumePathFree(&Path);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
 
     FileContext = malloc(sizeof * FileContext);
     if (0 == FileContext)
-        return STATUS_INSUFFICIENT_RESOURCES;
-    memset(FileContext, 0, sizeof * FileContext);
-
-    CreateFlags = FILE_FLAG_BACKUP_SEMANTICS;
-    if (CreateOptions & FILE_DELETE_ON_CLOSE)
-        CreateFlags |= FILE_FLAG_DELETE_ON_CLOSE;
-
-    FileContext->Handle = CreateFileW(FullPath,
-        GrantedAccess, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0,
-        OPEN_EXISTING, CreateFlags, 0);
-    if (INVALID_HANDLE_VALUE == FileContext->Handle)
     {
-        free(FileContext);
-        return FspNtStatusFromWin32(GetLastError());
+        VolumePathFree(&Path);
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
+    memset(FileContext, 0, sizeof * FileContext);
+    FileContext->IsSynthetic = TRUE;
+    FileContext->Handle = INVALID_HANDLE_VALUE;
+    FileContext->Category = Path.Category;
+    FileContext->PackagePrefix = Path.PackagePrefix;
+    Path.Category = 0;
+    Path.PackagePrefix = 0;
+    VolumePathFree(&Path);
 
     *PFileContext = FileContext;
 
-    return GetFileInfoInternal(FileContext->Handle, FileInfo);
+    /* the index number of a synthetic directory is derived from its name
+     * (REQ-FS-012)
+     */
+    return GetSyntheticDirInfo(FileInfo,
+        HashEntryName(Ptfs->Namespace,
+            0 != FileContext->PackagePrefix ? FileContext->PackagePrefix : FileContext->Category),
+        0);
 }
 
 static NTSTATUS Overwrite(FSP_FILE_SYSTEM* FileSystem,
@@ -710,9 +1979,9 @@ static VOID Cleanup(FSP_FILE_SYSTEM* FileSystem,
     HANDLE Handle = HandleFromContext(FileContext);
 
     /* synthetic directories have no local handle and cannot be deleted
-     * (REQ-MAP-001)
+     * (REQ-MAP-001, REQ-FS-037)
      */
-    if (Context->IsRoot)
+    if (Context->IsSynthetic)
         return;
 
     if (Flags & FspCleanupDelete)
@@ -730,8 +1999,11 @@ static VOID Close(FSP_FILE_SYSTEM* FileSystem,
     PTFS_FILE_CONTEXT* FileContext = FileContext0;
     HANDLE Handle = HandleFromContext(FileContext);
 
-    if (!FileContext->IsRoot)
+    if (!FileContext->IsSynthetic)
         CloseHandle(Handle);
+
+    free(FileContext->Category);
+    free(FileContext->PackagePrefix);
 
     FspFileSystemDeleteDirectoryBuffer(&FileContext->DirBuffer);
     free(FileContext);
@@ -802,10 +2074,18 @@ static NTSTATUS GetFileInfo(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext,
     FSP_FSCTL_FILE_INFO* FileInfo)
 {
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
     PTFS_FILE_CONTEXT* Context = FileContext;
 
-    if (Context->IsRoot)
-        return GetSyntheticDirInfo(FileInfo);
+    /* the synthetic directories have no local handle: their metadata is
+     * generated (REQ-MAP-001)
+     */
+    if (Context->IsSynthetic)
+        return GetSyntheticDirInfo(FileInfo,
+            HashEntryName(Ptfs->Namespace,
+                0 != Context->PackagePrefix ? Context->PackagePrefix :
+                (0 != Context->Category ? Context->Category : L"")),
+            Context->Timestamp);
 
     return GetFileInfoInternal(HandleFromContext(FileContext), FileInfo);
 }
@@ -922,11 +2202,7 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM* FileSystem,
 {
     PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
     PTFS_FILE_CONTEXT* FileContext = FileContext0;
-    HANDLE Handle = HandleFromContext(FileContext);
-    WCHAR FullPath[FULLPATH_SIZE];
-    ULONG Length, PatternLength;
-    HANDLE FindHandle;
-    WIN32_FIND_DATAW FindData;
+    ULONG Length, Index;
     union
     {
         UINT8 B[FIELD_OFFSET(FSP_FSCTL_DIR_INFO, FileNameBuf) + MAX_PATH * sizeof(WCHAR)];
@@ -948,10 +2224,7 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM* FileSystem,
              * namespace name itself are never root entries, and no local path is
              * touched.
              */
-            static PCWSTR Categories[] = { L"CLS", L"CSP", L"RTN", L"OTH" };
-            ULONG Index;
-
-            for (Index = 0; Index < ARRAYSIZE(Categories); Index++)
+            for (Index = 0; Index < CATEGORY_COUNT; Index++)
             {
                 if (!PtfsMatchPattern(Pattern, Categories[Index]))
                     continue;
@@ -959,61 +2232,80 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM* FileSystem,
                 memset(DirInfo, 0, sizeof * DirInfo);
                 Length = (ULONG)wcslen(Categories[Index]);
                 DirInfo->Size = (UINT16)(FIELD_OFFSET(FSP_FSCTL_DIR_INFO, FileNameBuf) + Length * sizeof(WCHAR));
-                GetSyntheticDirInfo(&DirInfo->FileInfo);
+                GetSyntheticDirInfo(&DirInfo->FileInfo,
+                    HashEntryName(Ptfs->Namespace, Categories[Index]), 0);
                 memcpy(DirInfo->FileNameBuf, Categories[Index], Length * sizeof(WCHAR));
 
                 if (!FspFileSystemFillDirectoryBuffer(&FileContext->DirBuffer, DirInfo, &DirBufferResult))
                     break;
             }
         }
-        else
+        else if (FileContext->IsSynthetic)
         {
-            PatternLength = (ULONG)wcslen(Pattern);
+            /* REQ-FS-001: the contents of a category directory are the
+             * documents of that category, taken from
+             * GET /:namespace/docnames/:cat. A package level is served from the
+             * listing of its category, filtered by the package prefix
+             * (REQ-MAP-008).
+             */
+            PTFS_DIR_ENTRY* Entries = 0;
+            ULONG EntryCount = 0;
+            NTSTATUS Result;
 
-            Length = GetFinalPathNameByHandleW(Handle, FullPath, FULLPATH_SIZE - 1, 0);
-            if (0 == Length)
-                DirBufferResult = FspNtStatusFromWin32(GetLastError());
-            else if (Length + 1 + PatternLength >= FULLPATH_SIZE)
-                DirBufferResult = STATUS_OBJECT_NAME_INVALID;
-            if (!NT_SUCCESS(DirBufferResult))
+            Result = BuildCategoryEntries(Ptfs, FileContext->Category,
+                FileContext->PackagePrefix, &Entries, &EntryCount);
+            if (!NT_SUCCESS(Result))
             {
-                FspFileSystemReleaseDirectoryBuffer(&FileContext->DirBuffer);
-                return DirBufferResult;
+                DirBufferResult = Result;
             }
-
-            if (L'\\' != FullPath[Length - 1])
-                FullPath[Length++] = L'\\';
-            memcpy(FullPath + Length, Pattern, PatternLength * sizeof(WCHAR));
-            FullPath[Length + PatternLength] = L'\0';
-
-            FindHandle = FindFirstFileW(FullPath, &FindData);
-            if (INVALID_HANDLE_VALUE != FindHandle)
+            else
             {
-                do
+                for (Index = 0; Index < EntryCount; Index++)
                 {
+                    if (!PtfsMatchPattern(Pattern, Entries[Index].Name))
+                        continue;
+
+                    Length = (ULONG)wcslen(Entries[Index].Name);
+                    if (Length >= MAX_PATH)
+                    {
+                        warn(L"the name %s of %s is too long and is not listed",
+                            Entries[Index].Name, FileContext->Category);
+                        continue;
+                    }
+
                     memset(DirInfo, 0, sizeof * DirInfo);
-                    Length = (ULONG)wcslen(FindData.cFileName);
                     DirInfo->Size = (UINT16)(FIELD_OFFSET(FSP_FSCTL_DIR_INFO, FileNameBuf) + Length * sizeof(WCHAR));
-                    DirInfo->FileInfo.FileAttributes = FindData.dwFileAttributes;
-                    DirInfo->FileInfo.ReparseTag = 0;
-                    DirInfo->FileInfo.FileSize =
-                        ((UINT64)FindData.nFileSizeHigh << 32) | (UINT64)FindData.nFileSizeLow;
-                    DirInfo->FileInfo.AllocationSize = (DirInfo->FileInfo.FileSize + ALLOCATION_UNIT - 1)
-                        / ALLOCATION_UNIT * ALLOCATION_UNIT;
-                    DirInfo->FileInfo.CreationTime = ((PLARGE_INTEGER)&FindData.ftCreationTime)->QuadPart;
-                    DirInfo->FileInfo.LastAccessTime = ((PLARGE_INTEGER)&FindData.ftLastAccessTime)->QuadPart;
-                    DirInfo->FileInfo.LastWriteTime = ((PLARGE_INTEGER)&FindData.ftLastWriteTime)->QuadPart;
-                    DirInfo->FileInfo.ChangeTime = DirInfo->FileInfo.LastWriteTime;
-                    DirInfo->FileInfo.IndexNumber = 0;
+                    /* a document is a file, a package level is a directory
+                     * (REQ-FS-008)
+                     */
+                    DirInfo->FileInfo.FileAttributes = Entries[Index].IsDirectory ?
+                        FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                    /* the listing reports no size; the size is exact only
+                     * after the content was fetched (REQ-FS-003)
+                     */
+                    DirInfo->FileInfo.FileSize = 0;
+                    DirInfo->FileInfo.AllocationSize = 0;
+                    DirInfo->FileInfo.CreationTime = Entries[Index].Timestamp;
+                    DirInfo->FileInfo.LastAccessTime = Entries[Index].Timestamp;
+                    DirInfo->FileInfo.LastWriteTime = Entries[Index].Timestamp;
+                    DirInfo->FileInfo.ChangeTime = Entries[Index].Timestamp;
+                    DirInfo->FileInfo.IndexNumber = Entries[Index].IndexNumber;
                     DirInfo->FileInfo.HardLinks = 0;
-                    memcpy(DirInfo->FileNameBuf, FindData.cFileName, Length * sizeof(WCHAR));
+                    memcpy(DirInfo->FileNameBuf, Entries[Index].Name, Length * sizeof(WCHAR));
 
                     if (!FspFileSystemFillDirectoryBuffer(&FileContext->DirBuffer, DirInfo, &DirBufferResult))
                         break;
-                } while (FindNextFileW(FindHandle, &FindData));
+                }
 
-                FindClose(FindHandle);
+                FreeDirEntries(Entries, EntryCount);
             }
+        }
+        else
+        {
+            /* the volume has no local directories: every directory of the
+             * tree is synthetic
+             */
+            DirBufferResult = STATUS_OBJECT_NAME_INVALID;
         }
 
         FspFileSystemReleaseDirectoryBuffer(&FileContext->DirBuffer);
@@ -1068,7 +2360,12 @@ static FSP_FILE_SYSTEM_INTERFACE PtfsInterface =
 
 static VOID PtfsDelete(PTFS* Ptfs);
 
-static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR UserName, PWSTR Password,
+/* the client of the mount is opened and probed by the caller and is handed
+ * over to the volume here; the volume owns it from that moment on
+ * (REQ-CONN-021)
+ */
+static NTSTATUS PtfsCreate(PWSTR Namespace, ATELIER_CLIENT* Client, PWSTR BaseUrl,
+    PWSTR UserName, PWSTR Password,
     PWSTR MountPoint, UINT32 DebugFlags,
     PTFS** PPtfs)
 {
@@ -1076,6 +2373,7 @@ static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR UserName, PWSTR Password,
     FSP_FSCTL_VOLUME_PARAMS VolumeParams;
     PTFS* Ptfs = 0;
     SIZE_T Length;
+    ULONG Index;
     NTSTATUS Result;
 
     *PPtfs = 0;
@@ -1090,6 +2388,21 @@ static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR UserName, PWSTR Password,
 
     /* from now on we must goto exit on failure */
 
+    /* the caches of the categories are guarded by their own lock
+     * (overview §9)
+     */
+    for (Index = 0; Index < CATEGORY_COUNT; Index++)
+        InitializeCriticalSection(&Ptfs->Cache[Index].Lock);
+
+    Length = (wcslen(Namespace) + 1) * sizeof(WCHAR);
+    Ptfs->Namespace = malloc(Length);
+    if (0 == Ptfs->Namespace)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+    memcpy(Ptfs->Namespace, Namespace, Length);
+
     Length = (wcslen(BaseUrl) + 1) * sizeof(WCHAR);
     Ptfs->BaseUrl = malloc(Length);
     if (0 == Ptfs->BaseUrl)
@@ -1098,6 +2411,10 @@ static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR UserName, PWSTR Password,
         goto exit;
     }
     memcpy(Ptfs->BaseUrl, BaseUrl, Length);
+
+    /* the volume takes over the client of the mount */
+    Ptfs->Client = *Client;
+    Client->Session = 0;
 
     Length = (wcslen(UserName) + 1) * sizeof(WCHAR);
     Ptfs->UserName = malloc(Length);
@@ -1167,11 +2484,24 @@ exit:
 
 static VOID PtfsDelete(PTFS* Ptfs)
 {
+    ULONG Index;
+
     if (0 != Ptfs->FileSystem)
         FspFileSystemDelete(Ptfs->FileSystem);
 
+    for (Index = 0; Index < CATEGORY_COUNT; Index++)
+    {
+        DeleteCriticalSection(&Ptfs->Cache[Index].Lock);
+        FreeDescriptors(Ptfs->Cache[Index].Descriptors, Ptfs->Cache[Index].Count);
+    }
+
+    AtelierClientClose(&Ptfs->Client);
+
     if (0 != Ptfs->BaseUrl)
         free(Ptfs->BaseUrl);
+
+    if (0 != Ptfs->Namespace)
+        free(Ptfs->Namespace);
 
     if (0 != Ptfs->Password)
     {
@@ -1181,7 +2511,11 @@ static VOID PtfsDelete(PTFS* Ptfs)
     }
 
     if (0 != Ptfs->UserName)
+    {
+        /* the login is wiped as well (REQ-CONN-011) */
+        SecureZeroMemory(Ptfs->UserName, wcslen(Ptfs->UserName) * sizeof(WCHAR));
         free(Ptfs->UserName);
+    }
 
     free(Ptfs);
 }
@@ -1322,8 +2656,11 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     HANDLE DebugLogHandle = INVALID_HANDLE_VALUE;
     WCHAR NamespaceSegment[MAX_PATH];
     WCHAR BaseUrlBuf[MAX_PATH];
+    ATELIER_CLIENT Client;
     PTFS* Ptfs = 0;
     NTSTATUS Result;
+
+    memset(&Client, 0, sizeof Client);
 
     for (argp = argv + 1, arge = argv + argc; arge > argp; argp++)
     {
@@ -1425,17 +2762,27 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         FspDebugLogSetHandle(DebugLogHandle);
     }
 
-    /* probe the server before exposing the volume: an unreachable server or
-     * rejected credentials must abort the mount (REQ-MOUNT-011, REQ-MOUNT-012)
+    /* the client of the mount is created once and is used for every request
+     * of the volume (REQ-CONN-021)
      */
-    Result = AtelierProbe(BaseUrlBuf, UserName, Password);
+    Result = AtelierClientOpen(&Client, BaseUrlBuf);
     if (!NT_SUCCESS(Result))
     {
         fail(L"mount of %s aborted: Atelier server is not usable", MountPoint);
         goto exit;
     }
 
-    Result = PtfsCreate(BaseUrlBuf, UserName, Password, MountPoint, DebugFlags, &Ptfs);
+    /* probe the server before exposing the volume: an unreachable server or
+     * rejected credentials must abort the mount (REQ-MOUNT-011, REQ-MOUNT-012)
+     */
+    Result = AtelierProbe(&Client, UserName, Password);
+    if (!NT_SUCCESS(Result))
+    {
+        fail(L"mount of %s aborted: Atelier server is not usable", MountPoint);
+        goto exit;
+    }
+
+    Result = PtfsCreate(Namespace, &Client, BaseUrlBuf, UserName, Password, MountPoint, DebugFlags, &Ptfs);
     if (!NT_SUCCESS(Result))
     {
         fail(L"cannot create file system");
@@ -1463,6 +2810,10 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
 exit:
     if (!NT_SUCCESS(Result) && 0 != Ptfs)
         PtfsDelete(Ptfs);
+
+    /* the client is closed here unless the volume took it over */
+    if (0 != Client.Session)
+        AtelierClientClose(&Client);
 
     return Result;
 

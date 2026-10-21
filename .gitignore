@@ -6,4 +6,5 @@
 *.pdb
 *.ilk
 *.exp
+*.lib
 winfsp-x64.dll

@@ -15,18 +15,25 @@ WinFsp SDK parts used by the build are vendored in the repository:
 - `passthrough/winfsp/` - headers (`winfsp.h`, `fsctl.h`, `launch.h`)
 - `passthrough/lib/winfsp-x64.lib` - import library
 
-The VS Code build task (`.vscode/tasks.json`, Ctrl+Shift+B on `isfs/isfs.c`) compiles and links with these local files, so no external SDK include path is required:
+The VS Code build task (`.vscode/tasks.json`, Ctrl+Shift+B) compiles and links with these local files, so no external SDK include path is required:
 
 ```
 cl /nologo /Zi /MT /D_DEBUG /D_CONSOLE /DUNICODE /D_UNICODE ^
-   /I passthrough ^
-   /Feisfs\isfs.exe /Foisfs\ isfs\isfs.c ^
+   /I passthrough /I . ^
+   /Feisfs\isfs.exe /Foisfs\ isfs\isfs.c cjson\cJSON.c ^
    /link passthrough\lib\winfsp-x64.lib advapi32.lib winhttp.lib
 ```
 
 Note: the value of `/Fe` and `/Fo` must be attached to the option (no space). The compiler
 from Visual Studio 2026 (18.x) does not accept `/Fe <name>` and reports
 `D9024: unrecognized source file type`, treating the name as a source file.
+
+=== Third-party ===
+
+- `cjson/` - [cJSON](https://github.com/DaveGamble/cJSON) v1.7.19, MIT license
+  (see `cjson/LICENSE`). It parses the UTF-8 JSON answers of the Atelier API;
+  the strings of the server are converted to UTF-16 by `Utf8ToWide()` in `isfs/isfs.c`.
+  The sources are vendored as they are, so they can be updated by replacing the two files.
 
 === Runtime DLL ===
 
