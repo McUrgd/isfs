@@ -77,8 +77,8 @@ static NTSTATUS GetFileInfoInternal(HANDLE Handle, FSP_FSCTL_FILE_INFO* FileInfo
 static NTSTATUS GetVolumeInfo(FSP_FILE_SYSTEM* FileSystem,
     FSP_FSCTL_VOLUME_INFO* VolumeInfo)
 {
-    /* the remote volume has no local backing directory; sizes stay at zero until
-     * REQ-MOUNT-008 defines the synthetic values
+    /* the remote volume has no quota API and no local backing store: 0/0 means
+     * "size unknown" (REQ-MOUNT-008)
      */
     VolumeInfo->TotalSize = 0;
     VolumeInfo->FreeSize = 0;

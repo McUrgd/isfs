@@ -125,7 +125,7 @@ filesystem semantics and is not called by the filesystem.
 
 | Filesystem operation | WinFsp callback | Atelier sequence | Notes |
 |---|---|---|---|
-| Mount / volume info | `GetVolumeInfo` | `GET /%SYS/namespaces` (probe) | no quota API; report configurable synthetic total/free size and label `ISFS` |
+| Mount / volume info | `GetVolumeInfo` | `GET /%SYS/namespaces` (probe) | no quota API; report `TotalSize = FreeSize = 0` ("size unknown") and label `ISFS` |
 | Enumerate root | `ReadDirectory` | `GET /%SYS/namespaces` | cached namespace list |
 | Enumerate `<ns>\<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 unless cached/prefetched |
 | Stat (path) | `GetFileInfo`, `GetSecurityByName` | `HEAD /:namespace/doc/<name>` then `GET` when size is required | timestamps from `ts`; size requires content |
@@ -382,7 +382,9 @@ These must be resolved and recorded as requirements before implementation:
     `-pass` parameters of `isfs.exe` and kept in memory only (REQ-MOUNT-010). How they are
     presented to the server (Basic or web session) follows the deployment's scheme.
 11. **Read-only namespaces** — configuration list (for example `%SYS`) vs rely on `403`.
-12. **Volume size/free size** — synthetic constants vs configurable values.
+12. **Volume size/free size** — resolved: `TotalSize` and `FreeSize` are both 0 ("size
+    unknown") and are not configurable
+    ([`mount-lifecycle.md`](../requirements/functional/mount-lifecycle.md), REQ-MOUNT-008).
 
 ## 13. Requirements traceability
 

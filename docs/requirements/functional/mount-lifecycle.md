@@ -26,7 +26,6 @@ configuration surface (command line, config file, service parameters) is decided
 | Credentials: password (`-pass`) | yes | — | REQ-MOUNT-010, 012 |
 | Connect/read timeout | no | 30 s | REQ-MOUNT-011 |
 | Read-only mode | no | off | REQ-MOUNT-020 |
-| Synthetic total/free size | no | configurable constant | REQ-MOUNT-008 |
 
 ## Requirements
 
@@ -97,16 +96,27 @@ Acceptance criteria:
 - Explorer volume properties show `ISFS` as the file system.
 - The name comes from the volume parameters and is stable across mounts.
 
-### REQ-MOUNT-008 — Synthetic volume size
+### REQ-MOUNT-008 — Volume size is reported as unknown (0/0)
 
-Status: draft
+Status: implemented
 
-Because the Atelier API exposes no quota, `GetVolumeInfo` must report configurable
-synthetic total and free sizes.
+Because the Atelier API exposes no quota and the volume has no local backing store,
+`GetVolumeInfo` must report `TotalSize = 0` and `FreeSize = 0`, meaning "size unknown".
+There is no synthetic capacity and no configuration for it.
 
 Acceptance criteria:
-- With configured values, Explorer and `fsutil volume diskfree X:` show those values.
-- Changing the configuration changes the reported values without contacting the server.
+- Explorer volume properties and `fsutil volume diskfree X:` show 0 bytes total and 0 bytes
+  free.
+- Used space (total minus free) is also 0.
+- The values are constant: they do not depend on the server, on the mount configuration, or
+  on the volume contents.
+- No mount setting changes the reported values.
+
+> Known limitation: Windows treats a reported total size of 0 as "no space". Explorer-initiated
+> copies and applications that pre-check free space therefore refuse to write to the volume,
+> even though ISFS itself accepts writes (REQ-MOUNT-020). Mounting read-only avoids the
+> misleading error path; with a writable mount, copying must be done with a tool that does
+> not check free space.
 
 ### REQ-MOUNT-009 — Atelier server address is required
 
@@ -313,11 +323,13 @@ naming, access control, and gateway concerns with no v1 consumer.
 
 From overview §12, to be resolved and folded into the requirements above:
 
-- read-only namespace policy (REQ-MOUNT-020);
-- synthetic volume size defaults (REQ-MOUNT-008).
+- read-only namespace policy (REQ-MOUNT-020).
 
 Resolved: authentication uses a login and password passed as the `-user` and `-pass`
 parameters of `isfs.exe`, kept in memory only (REQ-MOUNT-010).
+
+Resolved: the volume reports `TotalSize = 0` and `FreeSize = 0`, meaning "size unknown";
+the values are not configurable (REQ-MOUNT-008).
 
 Resolved: the Atelier server address is passed as `-p <host:port>`; ISFS composes
 `http://<host:port>/api/atelier/v1` from it (REQ-MOUNT-009). TLS selection is still open.
