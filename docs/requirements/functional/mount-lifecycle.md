@@ -44,7 +44,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-002 — A mount point is mandatory
 
-Status: draft
+Status: approved
 
 ISFS must refuse to start the file system when no mount point is supplied.
 
@@ -54,7 +54,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-003 — Supported mount point form
 
-Status: draft
+Status: approved
 
 The mount point must be a drive letter (`X:`) and nothing else; mounting onto a directory
 path is not supported.
@@ -66,7 +66,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-005 — Invalid mount points are rejected
 
-Status: draft
+Status: approved
 
 ISFS must reject a mount point that cannot host a volume, without leaving a partially
 mounted volume behind.
@@ -79,7 +79,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-006 — Volume label
 
-Status: draft
+Status: implemented
 
 The mounted volume must report the label `ISFS`.
 
@@ -89,7 +89,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-007 — File system name
 
-Status: draft
+Status: implemented
 
 The mounted volume must report the file system name `ISFS` to Windows.
 
