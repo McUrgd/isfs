@@ -61,8 +61,7 @@ Acceptance criteria:
 
 Status: approved
 
-The mount point must be a drive letter (`X:`) and nothing else; mounting onto a directory
-path is not supported.
+The mount point must be a drive letter (`X:`) ; mounting onto a directory path is not supported.
 
 Acceptance criteria:
 - With `-m X:`, drive `X:` shows the namespace root.
@@ -77,8 +76,7 @@ ISFS must reject a mount point that cannot host a volume, without leaving a part
 mounted volume behind.
 
 Acceptance criteria:
-- A mount point that is not a single drive letter (a directory path, a UNC path, a file
-  path) is rejected with an actionable error.
+- A mount point that is not a single drive letter is rejected with an actionable error.
 - A drive letter already in use is rejected with an actionable error.
 - After a rejected mount, no new drive letter is visible and the process exits non-zero.
 
