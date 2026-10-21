@@ -24,6 +24,7 @@
 #include <strsafe.h>
 #include <winhttp.h>
 #include <wctype.h>
+#include <sddl.h>
 
 #define PROGNAME                        "isfs"
 #define VOLUME_NAME                     "ISFS"
@@ -455,60 +456,92 @@ static NTSTATUS SetVolumeLabel_(FSP_FILE_SYSTEM* FileSystem,
     return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+/* ISFS has no server-side ACL model: the descriptor is synthesized and never
+ * read from or written to the server (overview §6). D:(A;;GA;;;WD) grants
+ * full access to everyone, which is the "full access" policy for the volume.
+ */
+static PSECURITY_DESCRIPTOR BuildFullAccessSecurityDescriptor(VOID)
+{
+    PSECURITY_DESCRIPTOR SecurityDescriptor = 0;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &SecurityDescriptor, 0))
+        return 0;
+
+    return SecurityDescriptor;
+}
+
+/* shared by GetSecurity and GetSecurityByName so both return the same
+ * synthesized descriptor with full access
+ */
+static NTSTATUS CopyFullAccessSecurityDescriptor(
+    PSECURITY_DESCRIPTOR SecurityDescriptor, SIZE_T* PSecurityDescriptorSize)
+{
+    PSECURITY_DESCRIPTOR FullAccess;
+    SIZE_T Size;
+    NTSTATUS Result = STATUS_SUCCESS;
+
+    if (0 == PSecurityDescriptorSize)
+        return STATUS_SUCCESS;
+
+    FullAccess = BuildFullAccessSecurityDescriptor();
+    if (0 == FullAccess)
+        return FspNtStatusFromWin32(GetLastError());
+
+    Size = GetSecurityDescriptorLength(FullAccess);
+
+    if (0 != SecurityDescriptor)
+    {
+        if (*PSecurityDescriptorSize < Size)
+            Result = STATUS_BUFFER_TOO_SMALL;
+        else
+            memcpy(SecurityDescriptor, FullAccess, Size);
+    }
+
+    *PSecurityDescriptorSize = Size;
+
+    LocalFree(FullAccess);
+
+    return Result;
+}
+
 static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* FileSystem,
     PWSTR FileName, PUINT32 PFileAttributes,
     PSECURITY_DESCRIPTOR SecurityDescriptor, SIZE_T* PSecurityDescriptorSize)
 {
-    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
-    WCHAR FullPath[FULLPATH_SIZE];
-    HANDLE Handle;
-    FILE_ATTRIBUTE_TAG_INFO AttributeTagInfo;
-    DWORD SecurityDescriptorSizeNeeded;
+    static PCWSTR Categories[] = { L"CLS", L"CSP", L"RTN", L"OTH" };
+    PCWSTR Name, End;
+    ULONG Index;
     NTSTATUS Result;
 
-    if (!ConcatPath(Ptfs, FileName, FullPath))
-        return STATUS_OBJECT_NAME_INVALID;
-
-    Handle = CreateFileW(FullPath,
-        FILE_READ_ATTRIBUTES | READ_CONTROL, 0, 0,
-        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
-    if (INVALID_HANDLE_VALUE == Handle)
-    {
-        Result = FspNtStatusFromWin32(GetLastError());
-        goto exit;
-    }
-
+    /* attributes are synthesized as well: nothing is read from the local
+     * file system (REQ-MOUNT-018)
+     */
     if (0 != PFileAttributes)
     {
-        if (!GetFileInformationByHandleEx(Handle,
-            FileAttributeTagInfo, &AttributeTagInfo, sizeof AttributeTagInfo))
+        *PFileAttributes = IsRootFileName(FileName) ?
+            FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+
+        for (Name = FileName; L'\\' == *Name || L'/' == *Name; Name++)
+            ;
+        for (End = Name; L'\0' != *End && L'\\' != *End && L'/' != *End; End++)
+            ;
+
+        for (Index = 0; Index < ARRAYSIZE(Categories); Index++)
         {
-            Result = FspNtStatusFromWin32(GetLastError());
-            goto exit;
+            if ((SIZE_T)(End - Name) == wcslen(Categories[Index]) &&
+                0 == _wcsnicmp(Name, Categories[Index], (SIZE_T)(End - Name)))
+            {
+                *PFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+                break;
+            }
         }
-
-        *PFileAttributes = AttributeTagInfo.FileAttributes;
-    }
-
-    if (0 != PSecurityDescriptorSize)
-    {
-        if (!GetKernelObjectSecurity(Handle,
-            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            SecurityDescriptor, (DWORD)*PSecurityDescriptorSize, &SecurityDescriptorSizeNeeded))
-        {
-            *PSecurityDescriptorSize = SecurityDescriptorSizeNeeded;
-            Result = FspNtStatusFromWin32(GetLastError());
-            goto exit;
-        }
-
-        *PSecurityDescriptorSize = SecurityDescriptorSizeNeeded;
     }
 
     Result = STATUS_SUCCESS;
 
-exit:
-    if (INVALID_HANDLE_VALUE != Handle)
-        CloseHandle(Handle);
+    if (0 != PSecurityDescriptorSize)
+        Result = CopyFullAccessSecurityDescriptor(SecurityDescriptor, PSecurityDescriptorSize);
 
     return Result;
 }
@@ -863,20 +896,10 @@ static NTSTATUS GetSecurity(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext,
     PSECURITY_DESCRIPTOR SecurityDescriptor, SIZE_T* PSecurityDescriptorSize)
 {
-    HANDLE Handle = HandleFromContext(FileContext);
-    DWORD SecurityDescriptorSizeNeeded;
-
-    if (!GetKernelObjectSecurity(Handle,
-        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-        SecurityDescriptor, (DWORD)*PSecurityDescriptorSize, &SecurityDescriptorSizeNeeded))
-    {
-        *PSecurityDescriptorSize = SecurityDescriptorSizeNeeded;
-        return FspNtStatusFromWin32(GetLastError());
-    }
-
-    *PSecurityDescriptorSize = SecurityDescriptorSizeNeeded;
-
-    return STATUS_SUCCESS;
+    /* every object exposes the same synthesized descriptor with full access;
+     * nothing is read from a local handle (REQ-MOUNT-018)
+     */
+    return CopyFullAccessSecurityDescriptor(SecurityDescriptor, PSecurityDescriptorSize);
 }
 
 static NTSTATUS SetSecurity(FSP_FILE_SYSTEM* FileSystem,
