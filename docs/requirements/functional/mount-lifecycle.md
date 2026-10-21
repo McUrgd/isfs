@@ -21,10 +21,11 @@ configuration surface (command line, config file, service parameters) is decided
 | Setting | Required | Default | Used by |
 |---|---|---|---|
 | Mount point (drive letter `X:`) | yes | — | REQ-MOUNT-002, 003, 005, 022 |
-| Atelier server address (`-p host:port`) | yes | — | REQ-MOUNT-009, 011 |
+| Atelier server address (`-p host:port`) | yes | — | REQ-MOUNT-009 |
+| Namespace (`-ns <namespace>`) | yes | — | REQ-MOUNT-009 |
 | Credentials: login (`-user`) | yes | — | REQ-MOUNT-010, 012 |
 | Credentials: password (`-pass`) | yes | — | REQ-MOUNT-010, 012 |
-| Connect/read timeout | no | 30 s | REQ-MOUNT-011 |
+| Connect/read timeout | no | 30 s | REQ-MOUNT-021 |
 | Read-only mode | no | off | REQ-MOUNT-020 |
 
 ## Requirements
@@ -118,22 +119,32 @@ Acceptance criteria:
 > misleading error path; with a writable mount, copying must be done with a tool that does
 > not check free space.
 
-### REQ-MOUNT-009 — Atelier server address is required
+### REQ-MOUNT-009 — Atelier server address and namespace are required
 
-Status: implemented
+Status: draft
 
 ISFS must require the address of the Atelier server, passed as the `-p host:port`
 parameter of `isfs.exe`. The parameter carries the host and the web port only; the base URL
 of the endpoint is composed by ISFS as `http://<host:port>/api/atelier/v1`. The address is
 not validated ahead of the mount attempt: it is used as given.
 
+ISFS must also require the namespace, passed as the `-ns <namespace>` parameter of
+`isfs.exe`. Its value is substituted for `:namespace` in every Atelier URL. The namespace is
+not discovered and is not part of the volume path: it becomes the root of the mounted
+volume. Names are case-insensitive and the server's canonical (uppercased) form is used in
+responses and listings.
+
 Acceptance criteria:
 - Running without `-p` prints usage, creates no volume, and exits with a non-zero status.
-- With `-p <host:port>`, requests are issued to
-  `http://<host:port>/api/atelier/v1/%SYS/namespaces` and
-  `http://<host:port>/api/atelier/v1/:namespace`.
+- Running without `-ns` prints usage, creates no volume, and exits with a non-zero status
+  (same behaviour as a missing mount point, REQ-MOUNT-002).
+- With `-p <host:port>` and `-ns <namespace>`, requests are issued to
+  `http://<host:port>/api/atelier/v1/<namespace>` and its subpaths; `<namespace>` is exactly
+  the `-ns` value.
 - A malformed or unreachable address is not rejected up front; the mount fails at the
-  server probe with an actionable error naming the endpoint (REQ-MOUNT-011).
+  server probe with an actionable error naming the endpoint (REQ-MOUNT-021).
+- The `-ns` value is not exposed as a directory: the volume root represents the namespace
+  itself.
 
 > Open point: because `-p` carries no scheme, the composed base URL is plain `http`. How TLS
 > is selected (a separate switch, a scheme-tolerant `-p`, or a global setting) is decided
@@ -162,22 +173,6 @@ Acceptance criteria:
 > written by ISFS, not that exposure; a later version may add a protected configuration file
 > or an interactive prompt.
 
-### REQ-MOUNT-011 — Fail fast when the server is unreachable
-
-Status: implemented
-
-Before exposing the volume, ISFS must probe the server, and a connection failure, DNS/TLS
-error, or timeout must abort the mount instead of mounting an unusable volume.
-
-The probe is `GET http://<host:port>/api/atelier/v1/%SYS/namespaces` performed with
-connect, send and receive timeouts of 30 s. It runs after the debug log is opened and before
-the volume is created, so the failure is visible in the service log or mount dialog.
-
-Acceptance criteria:
-- With the host unreachable, mount fails within the configured connect timeout.
-- The error message identifies the endpoint and the failure kind.
-- No drive letter remains after the failure.
-
 ### REQ-MOUNT-012 — Mount authentication failure
 
 Status: implemented
@@ -194,46 +189,24 @@ Acceptance criteria:
 - The mount result is `STATUS_LOGON_FAILURE` in the service log.
 - No volume is visible after the failure.
 
-### REQ-MOUNT-013 — Namespace discovery at mount
-
-Status: draft
-
-At mount time, ISFS must obtain the namespace list from `GET /%SYS/namespaces`.
-
-Acceptance criteria:
-- The namespaces returned by the endpoint appear as directories under the volume root.
-- The list is requested once per mount (subject to the namespace cache TTL) and not per
-  directory listing.
-- When the endpoint is unavailable (`404`/`500`) the mount fails with an actionable error
-  and no volume remains.
-- An empty result (`200` with no namespaces) is not an error: the mount succeeds and the
-  volume root is empty (REQ-MOUNT-018).
-
-### REQ-MOUNT-015 — Namespace validation at mount
-
-Status: draft
-
-At mount time, ISFS must validate every namespace it is about to expose with
-`GET /:namespace`, and must omit namespaces that cannot be accessed.
-
-Acceptance criteria:
-- A namespace returning `404` or `403` is not exposed and a warning naming it is logged.
-- A namespace returning `200` is exposed with the server's canonical (uppercased) name.
-- The mount succeeds even when namespaces are omitted; with none left exposed the root is
-  empty (REQ-MOUNT-018).
-
 ### REQ-MOUNT-018 — Root directory contents
 
 Status: draft
 
-The volume root must contain only the exposed namespaces as directories.
+The value of `-ns` is the `:namespace` of every Atelier request and the root of the mounted
+volume: `\` maps to `:namespace`, and the volume exposes only that one namespace. It is not a
+server-wide view and does not list namespaces.
 
 Acceptance criteria:
-- Enumerating `\` returns one directory per exposed namespace and no files.
-- The entries use the canonical server casing.
-- When no namespace is exposed (empty discovery result, or every namespace omitted by
-  REQ-MOUNT-015), enumerating `\` returns no entries and no error, so the drive appears as an
-  empty disk that can still be opened and browsed.
+- The root contains only the synthetic category directories of the `-ns` namespace
+  (`CLS`, `CSP`, `RTN`, `OTH`) and no files.
+- The namespace name itself is never an entry in the root; mounting `-ns USER` gives `\CLS\`,
+  not `\USER\CLS\`.
+- Requests issued while enumerating `\` target only the `-ns` namespace; no other namespace
+  is queried.
+- Document and category entries keep the server's canonical casing.
+- When the `-ns` namespace contains no documents, enumerating `\` returns no entries and no
+  error, so the drive appears as an empty disk that can still be opened and browsed.
 
 ### REQ-MOUNT-019 — Case-insensitive path resolution
 
@@ -264,11 +237,11 @@ Acceptance criteria:
 Status: draft
 
 Every mount failure must produce an actionable message that identifies the endpoint and the
-cause (authentication, DNS, TLS, timeout, namespace discovery) in the service log or mount
+cause (authentication, DNS, TLS, timeout, invalid namespace) in the service log or mount
 dialog.
 
 Acceptance criteria:
-- For each failure mode in REQ-MOUNT-011, 012, and 013, the log line names the endpoint and
+- For each failure mode in REQ-MOUNT-012, the log line names the endpoint and
   the failure kind.
 - No mount failure terminates silently without a message.
 
@@ -341,11 +314,8 @@ the values are not configurable (REQ-MOUNT-008).
 Resolved: the Atelier server address is passed as `-p <host:port>`; ISFS composes
 `http://<host:port>/api/atelier/v1` from it (REQ-MOUNT-009). TLS selection is still open.
 
-Resolved: the mount probe is `GET /%SYS/namespaces` with HTTP Basic credentials, and both an
-unreachable server and `401` abort the mount (REQ-MOUNT-011, REQ-MOUNT-012).
-
-Resolved: namespace discovery has no fallback. When `GET /%SYS/namespaces` is unavailable,
-the mount fails with an actionable error and no volume remains (REQ-MOUNT-013).
+Resolved: the mount probe uses HTTP Basic credentials, and a `401` aborts the mount
+(REQ-MOUNT-012).
 
 ## Related documents
 

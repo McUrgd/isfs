@@ -27,9 +27,7 @@
 #define PROGNAME                        "isfs"
 #define VOLUME_NAME                     "ISFS"
 #define ATELIER_API_PATH                "/api/atelier/v1"
-/* mount probe: GET /%SYS/namespaces, percent-encoded as %25SYS (REQ-MOUNT-011) */
-#define ATELIER_NAMESPACES_PATH         "/%25SYS/namespaces"
-/* connect/send/receive timeout for the mount probe (REQ-MOUNT-011) */
+/* connect/send/receive timeout for the mount probe (REQ-MOUNT-021) */
 #define ATELIER_TIMEOUT_MS              30000
 #define ALLOCATION_UNIT                 4096
 #define FULLPATH_SIZE                   (MAX_PATH + FSP_FSCTL_TRANSACT_PATH_SIZEMAX / sizeof(WCHAR))
@@ -44,7 +42,7 @@
 typedef struct
 {
     FSP_FILE_SYSTEM* FileSystem;
-    PWSTR BaseUrl; /* http://host:port/api/atelier/v1 (REQ-MOUNT-009) */
+    PWSTR BaseUrl; /* http://host:port/api/atelier/v1/<namespace> (REQ-MOUNT-009) */
     PWSTR UserName; /* login from -user, memory only (REQ-MOUNT-010) */
     PWSTR Password; /* password from -pass, memory only (REQ-MOUNT-010) */
 } PTFS;
@@ -193,17 +191,16 @@ static NTSTATUS AtelierTransportError(PCWSTR Endpoint, DWORD Error)
     return Result;
 }
 
-/* mount-time probe: GET /%SYS/namespaces against -p host:port.
- * Fails the mount when the server is unreachable (REQ-MOUNT-011) or rejects the
- * credentials (REQ-MOUNT-012). The password is only used in the Basic header and
+/* mount-time probe: GET /:namespace against the -p address with the -ns
+ * namespace. Fails the mount when the server is unreachable (REQ-MOUNT-021),
+ * rejects the credentials (REQ-MOUNT-012) or does not expose the namespace
+ * (REQ-MOUNT-009). The password is only used in the Basic header and
  * never logged (REQ-MOUNT-010).
  */
 static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
 {
     WCHAR HostName[256];
     WCHAR BasePath[1024];
-    WCHAR RequestPath[1100];
-    WCHAR DisplayUrl[1300];
     URL_COMPONENTS UrlComponents;
     HINTERNET Session = 0, Connection = 0, Request = 0;
     PWSTR AuthHeader = 0;
@@ -224,26 +221,13 @@ static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* copy the path literally: the percent in %25SYS must not be treated as a
-     * printf conversion (it is already percent-encoded for the URL)
-     */
-    if (FAILED(StringCchCopyW(RequestPath, ARRAYSIZE(RequestPath), BasePath)) ||
-        FAILED(StringCchCatW(RequestPath, ARRAYSIZE(RequestPath),
-            L"" ATELIER_NAMESPACES_PATH)) ||
-        FAILED(StringCchPrintfW(DisplayUrl, ARRAYSIZE(DisplayUrl),
-            L"%s/%%SYS/namespaces", BaseUrl)))
-    {
-        fail(L"cannot connect to %s: endpoint URL is too long", BaseUrl);
-        return STATUS_OBJECT_NAME_INVALID;
-    }
-
     /* connect to host:port directly, without a proxy */
     Session = WinHttpOpen(L"" PROGNAME L"/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (0 == Session)
     {
         fail(L"cannot connect to %s: cannot initialize HTTP client (Win32 error %lu)",
-            DisplayUrl, GetLastError());
+            BaseUrl, GetLastError());
         Result = STATUS_INSUFFICIENT_RESOURCES;
         goto exit;
     }
@@ -255,23 +239,23 @@ static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
     Connection = WinHttpConnect(Session, HostName, UrlComponents.nPort, 0);
     if (0 == Connection)
     {
-        Result = AtelierTransportError(DisplayUrl, GetLastError());
+        Result = AtelierTransportError(BaseUrl, GetLastError());
         goto exit;
     }
 
-    Request = WinHttpOpenRequest(Connection, L"GET", RequestPath, 0,
+    Request = WinHttpOpenRequest(Connection, L"GET", BasePath, 0,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         INTERNET_SCHEME_HTTPS == UrlComponents.nScheme ? WINHTTP_FLAG_SECURE : 0);
     if (0 == Request)
     {
-        Result = AtelierTransportError(DisplayUrl, GetLastError());
+        Result = AtelierTransportError(BaseUrl, GetLastError());
         goto exit;
     }
 
     AuthHeader = BasicAuthHeader(UserName, Password);
     if (0 == AuthHeader)
     {
-        fail(L"cannot connect to %s: cannot build credentials", DisplayUrl);
+        fail(L"cannot connect to %s: cannot build credentials", BaseUrl);
         Result = STATUS_INSUFFICIENT_RESOURCES;
         goto exit;
     }
@@ -282,7 +266,7 @@ static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
             WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(Request, 0))
     {
-        Result = AtelierTransportError(DisplayUrl, GetLastError());
+        Result = AtelierTransportError(BaseUrl, GetLastError());
         goto exit;
     }
 
@@ -290,41 +274,41 @@ static NTSTATUS AtelierProbe(PCWSTR BaseUrl, PCWSTR UserName, PCWSTR Password)
     if (!WinHttpQueryHeaders(Request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
         WINHTTP_HEADER_NAME_BY_INDEX, &StatusCode, &Size, WINHTTP_NO_HEADER_INDEX))
     {
-        Result = AtelierTransportError(DisplayUrl, GetLastError());
+        Result = AtelierTransportError(BaseUrl, GetLastError());
         goto exit;
     }
 
     if (StatusCode >= 200 && StatusCode < 300)
     {
-        info(L"connected to Atelier server at %s (HTTP %lu)", DisplayUrl, StatusCode);
+        info(L"connected to Atelier server at %s (HTTP %lu)", BaseUrl, StatusCode);
         Result = STATUS_SUCCESS;
     }
     else if (401 == StatusCode)
     {
         fail(L"cannot connect to %s: authentication failed (HTTP 401); "
-            L"check -user and -pass", DisplayUrl);
+            L"check -user and -pass", BaseUrl);
         Result = STATUS_LOGON_FAILURE;
     }
     else if (403 == StatusCode)
     {
         fail(L"cannot connect to %s: access denied (HTTP 403); "
-            L"the account may not use the Atelier API", DisplayUrl);
+            L"the account may not use the Atelier API", BaseUrl);
         Result = STATUS_ACCESS_DENIED;
     }
     else if (404 == StatusCode)
     {
-        fail(L"cannot connect to %s: endpoint not found (HTTP 404); "
-            L"the Atelier API is not available on this server", DisplayUrl);
+        fail(L"cannot connect to %s: namespace not found (HTTP 404); "
+            L"check -ns and that the account may access the namespace", BaseUrl);
         Result = STATUS_OBJECT_NAME_NOT_FOUND;
     }
     else if (StatusCode >= 500)
     {
-        fail(L"cannot connect to %s: server error (HTTP %lu)", DisplayUrl, StatusCode);
+        fail(L"cannot connect to %s: server error (HTTP %lu)", BaseUrl, StatusCode);
         Result = STATUS_UNEXPECTED_IO_ERROR;
     }
     else
     {
-        fail(L"cannot connect to %s: unexpected response (HTTP %lu)", DisplayUrl, StatusCode);
+        fail(L"cannot connect to %s: unexpected response (HTTP %lu)", BaseUrl, StatusCode);
         Result = STATUS_UNSUCCESSFUL;
     }
 
@@ -1078,6 +1062,40 @@ static ULONG wcstol_deflt(wchar_t* w, ULONG deflt)
     return L'\0' != w[0] && L'\0' == *endp ? ul : deflt;
 }
 
+/* builds the namespace path segment of the base URL from the -ns value.
+ * The value is used as is except for '%', which is percent-encoded because a
+ * literal '%' is not a valid URL escape (api.md §2): USER stays USER, %SYS
+ * becomes %25SYS.
+ */
+static BOOL ComposeNamespaceSegment(PCWSTR Namespace, PWSTR Buffer, SIZE_T BufferCch)
+{
+    WCHAR Ch;
+
+    for (; L'\0' != (Ch = *Namespace); Namespace++)
+    {
+        if (L'%' == Ch)
+        {
+            if (BufferCch < 4)
+                return FALSE;
+            *Buffer++ = L'%';
+            *Buffer++ = L'2';
+            *Buffer++ = L'5';
+            BufferCch -= 3;
+        }
+        else
+        {
+            if (BufferCch < 2)
+                return FALSE;
+            *Buffer++ = Ch;
+            BufferCch -= 1;
+        }
+    }
+
+    *Buffer = L'\0';
+
+    return TRUE;
+}
+
 static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
 {
 #define argtos(v)                       if (arge > ++argp) v = *argp; else goto usage
@@ -1088,10 +1106,12 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     ULONG DebugFlags = 0;
     PWSTR VolumePrefix = 0;
     PWSTR ServerAddress = 0;
+    PWSTR Namespace = 0;
     PWSTR UserName = 0;
     PWSTR Password = 0;
     PWSTR MountPoint = 0;
     HANDLE DebugLogHandle = INVALID_HANDLE_VALUE;
+    WCHAR NamespaceSegment[MAX_PATH];
     WCHAR BaseUrlBuf[MAX_PATH];
     PTFS* Ptfs = 0;
     NTSTATUS Result;
@@ -1100,6 +1120,12 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     {
         if (L'-' != argp[0][0])
             break;
+        /* REQ-MOUNT-009: the namespace is passed as -ns only */
+        if (0 == wcscmp(argp[0], L"-ns"))
+        {
+            argtos(Namespace);
+            continue;
+        }
         /* REQ-MOUNT-010: credentials are taken from -user and -pass only */
         if (0 == wcscmp(argp[0], L"-user"))
         {
@@ -1138,12 +1164,16 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     if (arge > argp)
         goto usage;
 
-    if (0 == ServerAddress || 0 == MountPoint || 0 == UserName || 0 == Password)
+    if (0 == ServerAddress || 0 == Namespace || L'\0' == Namespace[0] ||
+        0 == MountPoint || 0 == UserName || 0 == Password)
         goto usage;
 
-    /* REQ-MOUNT-009: -p carries host:port only; the base URL is composed here */
-    if (FAILED(StringCbPrintfW(BaseUrlBuf, sizeof BaseUrlBuf, L"http://%s" ATELIER_API_PATH,
-        ServerAddress)))
+    /* REQ-MOUNT-009: -p carries host:port and -ns the namespace; the base URL
+     * is composed here as http://host:port/api/atelier/v1/<namespace>
+     */
+    if (!ComposeNamespaceSegment(Namespace, NamespaceSegment, ARRAYSIZE(NamespaceSegment)) ||
+        FAILED(StringCbPrintfW(BaseUrlBuf, sizeof BaseUrlBuf, L"http://%s" ATELIER_API_PATH L"/%s",
+            ServerAddress, NamespaceSegment)))
         goto usage;
 
     EnableBackupRestorePrivileges();
@@ -1196,11 +1226,12 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
 
     MountPoint = FspFileSystemMountPoint(Ptfs->FileSystem);
 
-    info(L"%s%s%s -p %s -m %s",
+    info(L"%s%s%s -p %s -ns %s -m %s",
         L"" PROGNAME,
         0 != VolumePrefix && L'\0' != VolumePrefix[0] ? L" -u " : L"",
         0 != VolumePrefix && L'\0' != VolumePrefix[0] ? VolumePrefix : L"",
         BaseUrlBuf,
+        Namespace,
         MountPoint);
 
     Service->UserContext = Ptfs;
@@ -1223,6 +1254,7 @@ usage:
             "    -u \\Server\\Share    [UNC prefix (single backslash)]\n"
             "    -p Host:Port        [Atelier server address; base URL is http://Host:Port"
                 ATELIER_API_PATH "]\n"
+            "    -ns Namespace       [Atelier namespace; becomes the volume root]\n"
             "    -user Login         [Atelier login]\n"
             "    -pass Password      [Atelier password; kept in memory only]\n"
             "    -m MountPoint       [X:|*|directory]\n";

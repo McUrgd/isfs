@@ -14,8 +14,7 @@ existence.
 
 In scope:
 
-- discover namespaces and expose them as read-write directories;
-- expose documents (`CLS`, `CSP`) as files;
+- expose the namespace passed in `-ns` as the volume root and its documents (`CLS`, `CSP`) as files;
 - implement read, write, create, delete, rename and metadata queries by translating them into Atelier REST calls;
 - map Atelier/server errors to NTSTATUS values that Windows applications understand.
 - compile-on-save action;
@@ -43,10 +42,10 @@ WinFsp (user-mode file system host)
         ▼
 ISFS core
   ├─ FS adapter          WinFsp callbacks ↔ internal file system model
-  ├─ Path resolver       Windows path ↔ (namespace, category, document)
+  ├─ Path resolver       Windows path ↔ (category, document)
   ├─ Document codec      text line array / base64 ↔ bytes
   ├─ Atelier client      HTTPS, JSON, auth, ETag/hash, retries
-  ├─ Caches              namespace, document descriptors, content
+  ├─ Caches              document descriptors, content
   └─ Diagnostics         request log, error mapping
         │  HTTPS  /api/atelier/v1/...
         ▼
@@ -58,39 +57,42 @@ needs access to the filesystem implementation.
 
 ## 3. Volume and path model
 
-Documents are the only real files. Namespaces and categories are synthetic, read-only
-directories derived from API data.
+Documents are the only real files. Categories are synthetic, read-only directories derived
+from API data. The namespace is not part of the path: it is fixed for the whole mount by the
+`-ns` parameter of `isfs.exe` and becomes the volume root (`\`).
 
 | Windows path | Kind | Meaning | Atelier source |
 |---|---|---|---|
-| `\` | directory | server root | `GET /%SYS/namespaces` (see note) |
-| `\<namespace>\` | directory | one namespace | `GET /:namespace` |
-| `\<namespace>\<CAT>\` | directory (synthetic) | document category | `GET /:namespace/docnames/:cat` |
-| `\<namespace>\<CAT>\<name>` | file | one document | `GET`/`PUT`/`DELETE` `/:namespace/doc/<name>` |
+| `\` | directory | volume root = the mounted namespace | `GET /:namespace` (see note) |
+| `\<CAT>\` | directory (synthetic) | document category | `GET /:namespace/docnames/:cat` |
+| `\<CAT>\<name>` | file | one document | `GET`/`PUT`/`DELETE` `/:namespace/doc/<name>` |
 
-`<CAT>` is one of `CLS`, `CSP`. The file name is the **short Atelier document
+Every `:namespace` in the URLs above is the value passed to `-ns` (case-insensitive; the
+server uppercases it). Mounting another namespace means mounting another drive letter or
+mount point.
+
+`<CAT>` is one of `CLS`, `CSP`, `RTN`, `OTH`. The file name is the **short Atelier document
 name including its extension** (`Person.cls`, `index.csp`). Dots are converted to directory separators: package structure
 inside a class is not part of the name.
 
 ```
 I:\
-├── USER\
-│   ├── CLS\
-│   │   └── User.Person.cls
-│   ├── RTN\
-│   │   └── MyApp.mac
-│   ├── CSP\
-│   │   └── index.csp
-│   └── OTH\
-│       └── settings.json
-└── %SYS\
-    └── ...
+├── CLS\
+│   └── User.Person.cls
+├── RTN\
+│   └── MyApp.mac
+├── CSP\
+│   └── index.csp
+└── OTH\
+    └── settings.json
 ```
+
+(A mounted namespace `%SYS` looks the same; the namespace name itself is not a directory.)
 
 Rules:
 
-- Document names are used verbatim as file names. `%` is legal on NTFS, so `%SYS` and
-  `%`-prefixed documents work without escaping.
+- Document names are used verbatim as file names. `%` is legal on NTFS, so `%`-prefixed
+  documents work without escaping.
 - Name lookup is case-insensitive (Windows semantics), but results keep the server's
   canonical casing. If two server names differ only by case, the first is exposed and a
   warning is logged.
@@ -102,32 +104,18 @@ Rules:
 
 ### 4.1 Endpoint inventory
 
-Every route from API is accounted for. "None" means the endpoint has no
-filesystem semantics and is not called by the filesystem.
-
-| API | Purpose | Filesystem use |
-|---|---|---|
-| `GET /%SYS/namespaces` | list namespaces | none |
-| `GET /:namespace` | namespace info (databases, features) | validate/probe namespace, mount check, optional feature detection |
-| `GET /:namespace/docnames` | list all documents | directory enumeration (all categories) |
-| `GET /:namespace/docnames/:cat` | list documents by category | category directory enumeration |
-| `GET /:namespace/docnames/:cat/:type` | list documents by category and type | optional type-filtered enumeration |
-| `GET /:namespace/doc/(.*)` | read a document | `Read`, `Open`, `GetFileInfo`, rename source |
-| `HEAD /:namespace/doc/(.*)` | document metadata/hash | `GetFileInfo`, `GetSecurityByName`, conflict detection |
-| `PUT /:namespace/doc/(.*)` | create/update a document | `Create`, `Write`/`Flush`, overwrite, rename target |
-| `DELETE /:namespace/doc/(.*)` | delete a document | `Cleanup(Delete)`, rename source cleanup |
-| `POST /:namespace/docs` | batch read documents | optional prefetch (directory size/content warming) |
-| `POST /:namespace/modified/:type` | changed-document hashes | metadata cache invalidation (only `CLS` is supported by the API) |
-| `DELETE /:namespace/docs` | batch delete documents | none (single deletes are enough for the FS) |
-| `POST /:namespace/action/compile` | compile documents | none in v1 (future control file/IOCTL) |
+The complete list of Atelier v1 routes is maintained in [`api.md`](api.md) — see §7
+"Endpoint index" and §8 "Endpoint reference"; it is not duplicated here. This document only
+covers which of those routes the filesystem calls (the mapping is in §4.2); all other routes
+have no filesystem semantics and are not used.
 
 ### 4.2 Operations
 
 | Filesystem operation | WinFsp callback | Atelier sequence | Notes |
 |---|---|---|---|
-| Mount / volume info | `GetVolumeInfo` | `GET /%SYS/namespaces` (probe) | no quota API; report `TotalSize = FreeSize = 0` ("size unknown") and label `ISFS` |
-| Enumerate root | `ReadDirectory` | `GET /%SYS/namespaces` | cached namespace list |
-| Enumerate `<ns>\<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 unless cached/prefetched |
+| Mount / volume info | `GetVolumeInfo` | `GET /:namespace` (probe of the `-ns` namespace) | no quota API; report `TotalSize = FreeSize = 0` ("size unknown") and label `ISFS` |
+| Enumerate root | `ReadDirectory` | `GET /:namespace/docnames` | category directories derived from the document list; no namespace lookup |
+| Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 unless cached/prefetched |
 | Stat (path) | `GetFileInfo`, `GetSecurityByName` | `HEAD /:namespace/doc/<name>` then `GET` when size is required | timestamps from `ts`; size requires content |
 | Open existing | `Open` | `HEAD` / `GET` document | load content once per handle; serve ranges from memory |
 | Read | `Read` | `GET` document (on cache miss) | Atelier has no range read; whole document is fetched |
@@ -150,7 +138,7 @@ filesystem semantics and is not called by the filesystem.
 Atelier v1 has no rename or copy endpoint. Rename is composed:
 
 1. `GET` the source document (content, `ts`, hash).
-2. `PUT` the target name (possibly in another namespace/category), preserving `enc` and
+2. `PUT` the target name (possibly in another category), preserving `enc` and
    content.
 3. `DELETE` the source document.
 4. Update both source and target caches.
@@ -162,8 +150,9 @@ Consequences:
 - Renaming onto an existing file follows Windows `ReplaceIfExists`: the target is
   overwritten by step 2. If the caller does not allow replacement, the request is rejected
   with `STATUS_OBJECT_NAME_COLLISION` before any API call.
-- Moving between namespaces or categories uses the target namespace/category in the `PUT`
-  URL. This is supported but adds a full download/upload.
+- Moving between categories uses the target category in the `PUT` URL. Moving between
+  namespaces is impossible: the namespace is fixed for the mount by `-ns`, so a cross-volume
+  move is a copy between two mounts.
 - Directory rename is impossible because directories are synthetic; it returns
   `STATUS_NOT_SUPPORTED`.
 
@@ -293,12 +282,12 @@ Explorer.
 
 ## 8. Caching and consistency
 
-All caches are in memory; the server is authoritative.
+All caches are in memory; the server is authoritative. The namespace is fixed per mount, so
+there is no namespace cache.
 
-- **Namespace cache** — result of `GET /%SYS/namespaces`, TTL 60 s.
-- **Document descriptor cache** — per `(namespace, category)`: entries from
+- **Document descriptor cache** — per category: entries from
   `GetDocNames` (`name`, `cat`, `ts`, `db`, `gen`), TTL 30 s by default.
-- **Content cache** — keyed by `(namespace, document name, hash/ts)`, LRU with a configurable
+- **Content cache** — keyed by `(document name, hash/ts)`, LRU with a configurable
   byte limit (default 64 MiB). A conditional `GET` with the stored hash returns `304` and
   avoids re-downloading unchanged content.
 - **Dirty buffers** — per open handle, flushed on demand. Multiple handles to the same
@@ -315,8 +304,8 @@ entries.
 ## 9. Concurrency and locking
 
 - One mutex per document serializes flush, rename, delete and cache updates.
-- Directory enumeration is serialized per `(namespace, category)` to avoid duplicate
-  `GetDocNames` calls; other callbacks may proceed in parallel.
+- Directory enumeration is serialized per category to avoid duplicate `GetDocNames` calls;
+  other callbacks may proceed in parallel.
 - Writes are write-through at close/flush, not write-behind on a timer.
 - The Atelier API exposes no client-side locks. Windows sharing modes are enforced locally
   by WinFsp; server-side locks from Studio/other clients appear as `423`/`425` and are
@@ -338,8 +327,8 @@ entries.
   startup.
 - Keep the Atelier request/response correlation in one log scope per filesystem operation,
   so a WinFsp callback can be traced end to end.
-- Mount failures (`401`, DNS, TLS, timeout, unavailable `GET /%SYS/namespaces`) must produce
-  an actionable message in the mount dialog/service log.
+- Mount failures (`401`, DNS, TLS, timeout, wrong or inaccessible `-ns` namespace) must
+  produce an actionable message in the mount dialog/service log.
 
 ## 11. Not mapped / out of scope
 
@@ -360,13 +349,15 @@ entries.
 
 These must be resolved and recorded as requirements before implementation:
 
-1. **Namespace discovery** — resolved in
-   [`mount-lifecycle.md`](../requirements/functional/mount-lifecycle.md) (REQ-MOUNT-013):
-   `GET /%SYS/namespaces` is the only source (no configured fallback list); an empty result
-   yields an empty volume, an unavailable endpoint fails the mount.
-2. **Path layout** — flat `\<ns>\<CAT>\<name>` (current proposal) vs nested package
-   directories. Flat is lossless and simpler; nested is friendlier but needs an escaping
-   scheme.
+1. **Namespace selection** — resolved: the namespace is passed as the `-ns` parameter of
+   `isfs.exe` and becomes the volume root. There is no namespace discovery and no namespace
+   directory in the tree. The mount validates the namespace with `GET /:namespace`; a wrong
+   or inaccessible namespace fails the mount (see
+   [`mount-lifecycle.md`](../requirements/functional/mount-lifecycle.md), which still
+   describes the former discovery probe and must be updated to match).
+2. **Path layout** — flat `\<CAT>\<name>` at the namespace root (current proposal) vs nested
+   package directories. Flat is lossless and simpler; nested is friendlier but needs an
+   escaping scheme.
 3. **Size strategy** — default lazy (0 in listings) vs opt-in batch prefetch; measure the
    cost on large namespaces.
 4. **Conflict policy** — always fail on `409`, or offer a per-mount "force overwrite"
@@ -376,12 +367,12 @@ These must be resolved and recorded as requirements before implementation:
 6. **Case collisions** — skip duplicates, suffix them, or fail the mount; log format.
 7. **Timestamp time zone** — accept server-local `ts` as-is, or add a configurable offset.
 8. **Generated/system documents** — default visibility and `hideSystemDocuments` defaults.
-9. **Rename across namespaces** — allow (download/upload) or restrict to the same
-   namespace for v1.
+9. **Rename across namespaces** — resolved: not applicable. The namespace is fixed by
+   `-ns`, so only category moves within the mounted namespace exist (see §4.3).
 10. **Authentication** — resolved: the login and password are passed as the `-user` and
     `-pass` parameters of `isfs.exe` and kept in memory only (REQ-MOUNT-010). The mount
-    probe presents them as HTTP Basic to `GET /%SYS/namespaces`; a web-session scheme is not
-    used in v1 (REQ-MOUNT-011, REQ-MOUNT-012).
+    probe presents them as HTTP Basic to `GET /:namespace`; a web-session scheme is not
+    used in v1 (REQ-MOUNT-012).
 11. **Read-only namespaces** — configuration list (for example `%SYS`) vs rely on `403`.
 12. **Volume size/free size** — resolved: `TotalSize` and `FreeSize` are both 0 ("size
     unknown") and are not configurable
