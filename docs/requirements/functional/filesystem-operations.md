@@ -59,7 +59,8 @@ category.
 Acceptance criteria:
 - Listing `\<CAT>\` issues one request to `/docnames/<CAT>` for that category.
 - The entries of the listing are the documents of that category and of no other
-  category.
+  category; a document appears as a file or as a package level, according to the
+  decomposition of its name (REQ-MAP-004, REQ-MAP-007).
 - The root listing is not part of this requirement: the contents of `\` are
   defined by REQ-MOUNT-018.
 - The listing is served from the descriptor cache where the cache is valid; the
@@ -294,8 +295,8 @@ server only after a successful flush.
 Acceptance criteria:
 - The `Create` callback issues no request.
 - The file exists on the server only after a successful `PUT`.
-- A `GetFileInfo` for the new path before the first flush reports it as missing
-  on the server, or as the local buffer, as decided in `atelier-mapping.md`.
+- A `GetFileInfo` for the new path before the first flush reports the local
+  buffer of the handle (REQ-MAP-014).
 
 ### REQ-FS-019 — A new document that is never written is stored empty
 
@@ -658,8 +659,8 @@ Open: the exact status that a refused directory operation reports
 The requirement above uses `STATUS_NOT_SUPPORTED`, because the operation is not
 part of the file system model rather than forbidden by the server.
 
-Open: whether a create reports the new file as present before the first flush
-(REQ-FS-018).
+Resolved: a create reports the new file as present, with the content of its
+local buffer, before the first flush (REQ-MAP-014).
 
 ## Related documents
 

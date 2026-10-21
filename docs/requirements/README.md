@@ -13,7 +13,7 @@ retiring a requirement file.
 |---|---|---|
 | Mount / attach lifecycle (drive letter, connect, disconnect) | [`functional/mount-lifecycle.md`](functional/mount-lifecycle.md) | draft |
 | Filesystem operations (read, write, create, delete, rename, directory listing) | [`functional/filesystem-operations.md`](functional/filesystem-operations.md) | draft |
-| Mapping of Atelier resources (packages, directories) to filesystem paths | `functional/atelier-mapping.md` | planned |
+| Mapping of Atelier resources (packages, directories) to filesystem paths | [`functional/atelier-mapping.md`](functional/atelier-mapping.md) | draft |
 | Connection and authentication (server, credentials, session handling) | `functional/connection-auth.md` | draft |
 | Errors, diagnostics and logging | `functional/errors-diagnostics.md` | planned |
 | Caching and performance behaviour | `functional/caching.md` | planned |

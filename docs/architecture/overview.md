@@ -57,28 +57,63 @@ needs access to the filesystem implementation.
 
 ## 3. Volume and path model
 
-Documents are the only real files. Categories are synthetic, read-only directories derived
-from API data. The namespace is not part of the path: it is fixed for the whole mount by the
-`-ns` parameter of `isfs.exe` and becomes the volume root (`\`).
+Documents are the only real files. Their categories and their package levels are synthetic,
+read-only directories derived from API data. The namespace is not part of the path: it is
+fixed for the whole mount by the `-ns` parameter of `isfs.exe` and becomes the volume root
+(`\`).
 
 | Windows path | Kind | Meaning | Atelier source |
 |---|---|---|---|
 | `\` | directory | volume root = the mounted namespace | `GET /:namespace` (see note) |
 | `\<CAT>\` | directory (synthetic) | document category | `GET /:namespace/docnames/:cat` |
-| `\<CAT>\<name>` | file | one document | `GET`/`PUT`/`DELETE` `/:namespace/doc/<name>` |
+| `\<CAT>\<PKG>\` | directory (synthetic) | one package level | derived from the names of `GET /:namespace/docnames/:cat` |
+| `\<CAT>\<PKG>\…\<NAME>` | file | one document | `GET`/`PUT`/`DELETE` `/:namespace/doc/<name>` |
 
 Every `:namespace` in the URLs above is the value passed to `-ns` (case-insensitive; the
 server uppercases it). Mounting another namespace means mounting another drive letter or
 mount point.
 
-`<CAT>` is one of `CLS`, `CSP`, `RTN`, `OTH`. The file name is the **short Atelier document
-name including its extension** (`Person.cls`, `index.csp`). Dots are converted to directory separators: package structure
-inside a class is not part of the name.
+`<CAT>` is one of `CLS`, `CSP`, `RTN`, `OTH`. The category of a document follows the
+extension rules of [`api.md`](api.md) §4 (`CLS` for `.cls`, `RTN` for `.mac`/`.int`/
+`.inc`/`.bas`/`.mvi`/`.mvb`, `CSP` for `.csp`/`.csr`, `OTH` for everything else).
+
+### 3.1 Name decomposition
+
+The Atelier name of a document is the **short Atelier document name including its
+extension** (`User.Person.cls`, `MyApp.mac`, `index.csp`). The name is split into a
+directory path and a file name:
+
+1. The **extension** is the part after the last dot of the name; it stays with the file.
+2. Every **earlier dot** of the name becomes a directory separator. The segments in front
+   of the file name are the package levels of the document.
+3. A name without a dot has no extension and stays a single segment.
+4. A name that begins with a dot is not decomposed: the whole name is one segment.
+
+```
+User.Person.cls     →  CLS\User\Person.cls
+MyApp.mac           →  RTN\MyApp.mac
+%Activate.Enum.cls  →  CLS\%Activate\Enum.cls
+index.csp           →  CSP\index.csp
+notes.backup.txt    →  OTH\notes\backup.txt
+```
+
+The mapping is lossless in both directions: a path is turned back into an Atelier name by
+joining all of its segments with dots, the extension staying with the last segment
+(`CLS\User\Person.cls` → `User.Person.cls`). Therefore:
+
+- the Atelier name in every URL is always the dotted name, never the path;
+- a document whose name contains a dot is reachable **only** through the nested path —
+  there is no flat alias, because `CLS\User.Person.cls` would be indistinguishable from the
+  package directory `User` followed by the file `Person.cls`;
+- the package levels are not a server-side resource: they are derived from the dotted names
+  of a category listing and exist only as long as a document below them exists.
 
 ```
 I:\
 ├── CLS\
-│   └── User.Person.cls
+│   ├── Person.cls
+│   └── User\
+│       └── Person.cls
 ├── RTN\
 │   └── MyApp.mac
 ├── CSP\
@@ -91,14 +126,16 @@ I:\
 
 Rules:
 
-- Document names are used verbatim as file names. `%` is legal on NTFS, so `%`-prefixed
-  documents work without escaping.
-- Name lookup is case-insensitive (Windows semantics), but results keep the server's
-  canonical casing. If two server names differ only by case, the first is exposed and a
-  warning is logged.
+- The segments of a document name are used verbatim as path segments. `%` is legal on
+  NTFS, so `%`-prefixed documents work without escaping.
+- Name lookup is case-insensitive at every level (Windows semantics), but results keep the
+  server's canonical casing. If two server names differ only by case, the first is exposed
+  and a warning is logged.
 - Generated documents are hidden (`generated=0`). 
-- There is no escaping scheme. If lossless mapping of illegal names becomes a
-  requirement, it must be added as a separate, documented transformation.
+- There is no escaping scheme. A document whose name does not decompose into segments that
+  are legal NTFS names is not exposed, and a warning is logged. If lossless mapping of
+  illegal names becomes a requirement, it must be added as a separate, documented
+  transformation.
 
 ## 4. Filesystem operations → Atelier API
 
@@ -115,7 +152,7 @@ have no filesystem semantics and are not used.
 |---|---|---|---|
 | Mount / volume info | `GetVolumeInfo` | `GET /:namespace` (probe of the `-ns` namespace) | no quota API; report `TotalSize = FreeSize = 0` ("size unknown") and label `ISFS` |
 | Enumerate root | `ReadDirectory` | `GET /:namespace/docnames` | category directories derived from the document list; no namespace lookup |
-| Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 unless cached/prefetched |
+| Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 unless cached/prefetched; package levels are derived from the names of the listing (§3.1) |
 | Stat (path) | `GetFileInfo`, `GetSecurityByName` | `HEAD /:namespace/doc/<name>` then `GET` when size is required | timestamps from `ts`; size requires content |
 | Open existing | `Open` | `HEAD` / `GET` document | load content once per handle; serve ranges from memory |
 | Read | `Read` | `GET` document (on cache miss) | Atelier has no range read; whole document is fetched |
@@ -138,7 +175,8 @@ have no filesystem semantics and are not used.
 Atelier v1 has no rename or copy endpoint. Rename is composed:
 
 1. `GET` the source document (content, `ts`, hash).
-2. `PUT` the target name (possibly in another category), preserving `enc` and
+2. `PUT` the target name — the dotted Atelier name reconstructed from the target path
+   (§3.1), possibly in another category or another package — preserving `enc` and
    content.
 3. `DELETE` the source document.
 4. Update both source and target caches.
@@ -150,10 +188,12 @@ Consequences:
 - Renaming onto an existing file follows Windows `ReplaceIfExists`: the target is
   overwritten by step 2. If the caller does not allow replacement, the request is rejected
   with `STATUS_OBJECT_NAME_COLLISION` before any API call.
-- Moving between categories uses the target category in the `PUT` URL. Moving between
-  namespaces is impossible: the namespace is fixed for the mount by `-ns`, so a cross-volume
-  move is a copy between two mounts.
-- Directory rename is impossible because directories are synthetic; it returns
+- Moving between categories or between package levels changes the Atelier document name:
+  the `PUT` URL carries the dotted name of the target path, and the source document is
+  deleted under its old name. Moving between namespaces is impossible: the namespace is
+  fixed for the mount by `-ns`, so a cross-volume move is a copy between two mounts.
+- Directory rename is impossible because directories are synthetic — this holds for the
+  category directories and for the package levels alike; it returns
   `STATUS_NOT_SUPPORTED`.
 
 ### 4.4 Write semantics
@@ -232,7 +272,7 @@ category, database and timestamp; the rest is synthesized.
 | `LastAccessTime` | document `ts` (or current time when the cache was warmed) |
 | `LastWriteTime` | document `ts` |
 | `ChangeTime` | document `ts` |
-| `IndexNumber` | stable hash (FNV-1a 64) of `namespace + "\0" + document name` |
+| `IndexNumber` | stable hash (FNV-1a 64) of `namespace + "\0" + document name` (the dotted Atelier name of §3.1, not the path) |
 | `HardLinks` | 0 |
 | `ReparseTag` | 0 |
 
@@ -334,7 +374,7 @@ entries.
 
 | Capability | Reason |
 |---|---|
-| Create/delete/rename namespaces or category dirs | synthetic directories; namespace lifecycle is server administration |
+| Create/delete/rename namespaces or directories (category and package levels) | synthetic directories; namespace lifecycle is server administration |
 | Compile, index, SQL query, async work | control plane; mapping to files would be misleading and unsafe |
 | Ensemble class/adapter browsing | could be virtual folders later; no v1 requirement |
 | `GetMetaData` ZIP, jobs, debugger, legacy converters | no filesystem semantics |
@@ -355,9 +395,11 @@ These must be resolved and recorded as requirements before implementation:
    or inaccessible namespace fails the mount (see
    [`mount-lifecycle.md`](../requirements/functional/mount-lifecycle.md), which still
    describes the former discovery probe and must be updated to match).
-2. **Path layout** — flat `\<CAT>\<name>` at the namespace root (current proposal) vs nested
-   package directories. Flat is lossless and simpler; nested is friendlier but needs an
-   escaping scheme.
+2. **Path layout** — resolved: nested package directories. The dots of an Atelier document
+   name become directory levels (§3.1), so `User.Person.cls` is exposed as
+   `\<CAT>\User\Person.cls`. The layout is lossless in both directions, because the
+   extension is the part after the last dot and the name is reconstructed by joining the
+   path segments with dots; no escaping scheme is needed (§3.1).
 3. **Size strategy** — default lazy (0 in listings) vs opt-in batch prefetch; measure the
    cost on large namespaces.
 4. **Conflict policy** — always fail on `409`, or offer a per-mount "force overwrite"

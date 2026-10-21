@@ -218,8 +218,8 @@ Name lookup through the mounted volume must be case-insensitive while preserving
 server's canonical casing in listings.
 
 Acceptance criteria:
-- `\user\CLS\person.cls` resolves to `\USER\CLS\User.Person.cls`.
-- Enumeration shows `USER` and `User.Person.cls`, not the case used by the caller.
+- `\cls\user\person.cls` resolves to `\CLS\User\Person.cls`.
+- Enumeration shows `CLS`, `User` and `Person.cls`, not the case used by the caller.
 
 ### REQ-MOUNT-020 — Read-only mount
 

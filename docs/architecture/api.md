@@ -77,6 +77,11 @@ A document is identified by its full name including extension, for example
 `User.Person.cls`, `MyApp.mac`, `index.csp`. The server normalises and validates names;
 invalid names produce `400`.
 
+The name is a single string; the API has no notion of directories or packages. ISFS turns
+the dots of a name into directory levels when it exposes a document as a file
+([`overview.md`](overview.md) §3.1), so every URL below carries the dotted name
+(`/doc/User.Person.cls`), never a path.
+
 Categories are derived from the extension/type. The mapping used by the implementation
 (`getTypeCat`/`getDlgCat`) is:
 
