@@ -907,7 +907,7 @@ static FSP_FILE_SYSTEM_INTERFACE PtfsInterface =
 static VOID PtfsDelete(PTFS* Ptfs);
 
 static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR UserName, PWSTR Password,
-    PWSTR VolumePrefix, PWSTR MountPoint, UINT32 DebugFlags,
+    PWSTR MountPoint, UINT32 DebugFlags,
     PTFS** PPtfs)
 {
     FILETIME CreationTime;
@@ -971,13 +971,14 @@ static NTSTATUS PtfsCreate(PWSTR BaseUrl, PWSTR UserName, PWSTR Password,
     VolumeParams.PassQueryDirectoryPattern = 1;
     VolumeParams.FlushAndPurgeOnCleanup = 1;
     VolumeParams.UmFileContextIsUserContext2 = 1;
-    if (0 != VolumePrefix)
-        wcscpy_s(VolumeParams.Prefix, sizeof VolumeParams.Prefix / sizeof(WCHAR), VolumePrefix);
+    /* REQ-MOUNT-028: the volume is a local drive only; a UNC prefix (network
+     * share) is not supported, so VolumeParams.Prefix stays empty
+     */
     wcscpy_s(VolumeParams.FileSystemName, sizeof VolumeParams.FileSystemName / sizeof(WCHAR),
         L"" VOLUME_NAME);
 
     Result = FspFileSystemCreate(
-        VolumeParams.Prefix[0] ? L"" FSP_FSCTL_NET_DEVICE_NAME : L"" FSP_FSCTL_DISK_DEVICE_NAME,
+        L"" FSP_FSCTL_DISK_DEVICE_NAME,
         &VolumeParams,
         &PtfsInterface,
         &Ptfs->FileSystem);
@@ -1104,7 +1105,6 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     wchar_t** argp, ** arge;
     PWSTR DebugLogFile = 0;
     ULONG DebugFlags = 0;
-    PWSTR VolumePrefix = 0;
     PWSTR ServerAddress = 0;
     PWSTR Namespace = 0;
     PWSTR UserName = 0;
@@ -1152,9 +1152,6 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
             break;
         case L'p':
             argtos(ServerAddress);
-            break;
-        case L'u':
-            argtos(VolumePrefix);
             break;
         default:
             goto usage;
@@ -1210,7 +1207,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         goto exit;
     }
 
-    Result = PtfsCreate(BaseUrlBuf, UserName, Password, VolumePrefix, MountPoint, DebugFlags, &Ptfs);
+    Result = PtfsCreate(BaseUrlBuf, UserName, Password, MountPoint, DebugFlags, &Ptfs);
     if (!NT_SUCCESS(Result))
     {
         fail(L"cannot create file system");
@@ -1226,10 +1223,8 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
 
     MountPoint = FspFileSystemMountPoint(Ptfs->FileSystem);
 
-    info(L"%s%s%s -p %s -ns %s -m %s",
+    info(L"%s -p %s -ns %s -m %s",
         L"" PROGNAME,
-        0 != VolumePrefix && L'\0' != VolumePrefix[0] ? L" -u " : L"",
-        0 != VolumePrefix && L'\0' != VolumePrefix[0] ? VolumePrefix : L"",
         BaseUrlBuf,
         Namespace,
         MountPoint);
@@ -1251,7 +1246,6 @@ usage:
             "options:\n"
             "    -d DebugFlags       [-1: enable all debug logs]\n"
             "    -D DebugLogFile     [file path; use - for stderr]\n"
-            "    -u \\Server\\Share    [UNC prefix (single backslash)]\n"
             "    -p Host:Port        [Atelier server address; base URL is http://Host:Port"
                 ATELIER_API_PATH "]\n"
             "    -ns Namespace       [Atelier namespace; becomes the volume root]\n"
