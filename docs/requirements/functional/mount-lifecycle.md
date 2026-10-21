@@ -70,7 +70,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-005 — Invalid mount points are rejected
 
-Status: approved
+Status: implemented
 
 ISFS must reject a mount point that cannot host a volume, without leaving a partially
 mounted volume behind.

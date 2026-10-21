@@ -1097,6 +1097,53 @@ static BOOL ComposeNamespaceSegment(PCWSTR Namespace, PWSTR Buffer, SIZE_T Buffe
     return TRUE;
 }
 
+/* REQ-MOUNT-003: the mount point must be a single drive letter (X:).
+ * WinFsp would also accept a directory path as a mount point, which is not
+ * supported, so the form is checked before anything is mounted.
+ */
+static BOOL IsDriveLetterMountPoint(PCWSTR MountPoint)
+{
+    if (0 == MountPoint)
+        return FALSE;
+
+    return L'\0' != MountPoint[0] &&
+        L':' == MountPoint[1] &&
+        L'\0' == MountPoint[2] &&
+        ((L'A' <= MountPoint[0] && L'Z' >= MountPoint[0]) ||
+         (L'a' <= MountPoint[0] && L'z' >= MountPoint[0]));
+}
+
+/* REQ-MOUNT-005: a drive letter that is already in use cannot host the volume.
+ * Checked before the server is contacted, so a rejected mount leaves no
+ * partially mounted volume behind.
+ */
+static BOOL IsDriveLetterInUse(PCWSTR MountPoint)
+{
+    WCHAR DriveName[3];
+    WCHAR Target[MAX_PATH];
+    DWORD Drives;
+
+    DriveName[0] = MountPoint[0];
+    if (L'a' <= DriveName[0] && L'z' >= DriveName[0])
+        DriveName[0] -= (L'a' - L'A');
+    DriveName[1] = L':';
+    DriveName[2] = L'\0';
+
+    /* physical, removable and mapped network drives are reported here */
+    Drives = GetLogicalDrives();
+    if (0 != Drives && 0 != (Drives & (1UL << (DriveName[0] - L'A'))))
+        return TRUE;
+
+    /* subst drives and other per-session DOS device mappings are not part of
+     * the drive mask, so ask the DOS device namespace as well; WinFsp creates
+     * the mount point with DefineDosDevice, which fails on an existing mapping
+     */
+    if (0 != QueryDosDeviceW(DriveName, Target, ARRAYSIZE(Target)))
+        return TRUE;
+
+    return ERROR_FILE_NOT_FOUND != GetLastError();
+}
+
 static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
 {
 #define argtos(v)                       if (arge > ++argp) v = *argp; else goto usage
@@ -1164,6 +1211,25 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     if (0 == ServerAddress || 0 == Namespace || L'\0' == Namespace[0] ||
         0 == MountPoint || 0 == UserName || 0 == Password)
         goto usage;
+
+    /* REQ-MOUNT-003: only a drive letter (X:) can host the volume; a directory
+     * path is rejected before the server is contacted
+     */
+    if (!IsDriveLetterMountPoint(MountPoint))
+    {
+        fail(L"invalid mount point %s: expected a drive letter such as X:; "
+            L"mounting on a directory is not supported", MountPoint);
+        goto usage;
+    }
+
+    /* REQ-MOUNT-005: an occupied drive letter is rejected up front, so the
+     * mount does not fail halfway and leave a partially mounted volume behind
+     */
+    if (IsDriveLetterInUse(MountPoint))
+    {
+        fail(L"mount point %s is not usable: the drive letter is already in use", MountPoint);
+        goto usage;
+    }
 
     /* REQ-MOUNT-009: -p carries host:port and -ns the namespace; the base URL
      * is composed here as http://host:port/api/atelier/v1/<namespace>
