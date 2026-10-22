@@ -7,4 +7,5 @@
 *.ilk
 *.exp
 *.lib
+*.nativecodeanalysis.xml
 winfsp-x64.dll

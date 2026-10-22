@@ -98,7 +98,7 @@ static PWSTR BasicAuthHeader(PCWSTR UserName, PCWSTR Password)
     PWSTR Encoded = 0;
     BYTE* Utf8 = 0;
     int Utf8Size = 0;
-    SIZE_T EncodedCch, HeaderCch;
+    SIZE_T EncodedCch = 0, HeaderCch;
 
     Credentials = malloc((CredentialsCch + 1) * sizeof(WCHAR));
     if (0 == Credentials)

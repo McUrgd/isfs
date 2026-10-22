@@ -400,7 +400,7 @@ static NTSTATUS ParseCategoryListing(PBYTE Response, DWORD ResponseLength, PCWST
         Descriptors[Index].Category = Utf8ToWide(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(Item, "cat")));
         Descriptors[Index].Db = Utf8ToWide(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(Item, "db")));
         Descriptors[Index].Ts = Utf8ToWide(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(Item, "ts")));
-        Descriptors[Index].Generated = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(Item, "gen"));
+        Descriptors[Index].Generated = (BOOLEAN)(0 != cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(Item, "gen")));
 
         if (0 == Descriptors[Index].Name)
         {

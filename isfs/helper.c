@@ -148,9 +148,9 @@ ULONG SplitDocumentName(PCWSTR Name, PWSTR** PSegments)
     Start = Name;
     for (Index = 0;; Index++)
     {
-        WCHAR Ch = Name[Index];
+        WCHAR Current = Name[Index];
 
-        if (L'\0' == Ch || (L'.' == Ch && SegmentIndex + 1 < Count))
+        if (L'\0' == Current || (L'.' == Current && SegmentIndex + 1 < Count))
         {
             SIZE_T SegmentLength = (SIZE_T)(&Name[Index] - Start);
 
@@ -158,7 +158,7 @@ ULONG SplitDocumentName(PCWSTR Name, PWSTR** PSegments)
             Cursor[SegmentLength] = L'\0';
             Segments[SegmentIndex++] = Cursor;
             Cursor += SegmentLength + 1;
-            if (L'\0' == Ch)
+            if (L'\0' == Current)
                 break;
             Start = &Name[Index + 1];
         }
