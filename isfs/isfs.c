@@ -95,6 +95,9 @@ typedef struct
     PWSTR DocumentName; /* the canonical dotted name of a document */
     PBYTE Content; /* the decoded content of a document (REQ-FS-013) */
     SIZE_T ContentSize; /* the size of Content in bytes (REQ-FS-006) */
+    PWSTR Hash; /* the ETag of the document, its server hash (api.md §6) */
+    BOOLEAN Enc; /* the document is binary (api.md §5) */
+    BOOLEAN Dirty; /* the buffer differs from the server content (REQ-FS-020) */
     UINT64 Timestamp; /* the newest document timestamp below the directory, or the document ts */
 } PTFS_FILE_CONTEXT;
 
@@ -665,7 +668,7 @@ static NTSTATUS DecodeBinaryContent(const cJSON* Content, PBYTE* PData, SIZE_T* 
 
 /* parses the answer of GET /:namespace/doc/<name> (api.md §5, §8.3.1) */
 static NTSTATUS ParseDocument(PBYTE Response, DWORD ResponseLength, PCWSTR DocumentName,
-    PBYTE* PContent, SIZE_T* PContentSize, UINT64* PTimestamp)
+    PBYTE* PContent, SIZE_T* PContentSize, BOOLEAN* PEnc, UINT64* PTimestamp)
 {
     cJSON* Root = 0;
     const cJSON* Status;
@@ -680,6 +683,7 @@ static NTSTATUS ParseDocument(PBYTE Response, DWORD ResponseLength, PCWSTR Docum
 
     *PContent = 0;
     *PContentSize = 0;
+    *PEnc = FALSE;
     *PTimestamp = 0;
 
     Root = JsonParse((const char*)Response, ResponseLength);
@@ -740,7 +744,8 @@ static NTSTATUS ParseDocument(PBYTE Response, DWORD ResponseLength, PCWSTR Docum
 
     /* enc=false is a line array, enc=true is a base64 chunk array (REQ-FS-015, REQ-FS-016) */
     Enc = cJSON_GetObjectItemCaseSensitive(Result, "enc");
-    if (cJSON_IsTrue(Enc))
+    *PEnc = (BOOLEAN)(0 != cJSON_IsTrue(Enc));
+    if (*PEnc)
         NtStatus = DecodeBinaryContent(Content, PContent, PContentSize);
     else
         NtStatus = JoinTextContent(Content, PContent, PContentSize);
@@ -754,28 +759,51 @@ static NTSTATUS ParseDocument(PBYTE Response, DWORD ResponseLength, PCWSTR Docum
 }
 
 /* reads and decodes one document; the content is allocated and must be freed
- * with free() (REQ-FS-013, REQ-FS-014)
+ * with free(). Hash receives the ETag of the answer, the server hash of the
+ * document (REQ-FS-013, REQ-FS-014, api.md §6)
  */
 static NTSTATUS LoadDocument(PTFS* Ptfs, PCWSTR DocumentName,
+    PWSTR Hash, SIZE_T HashCch, BOOLEAN* PEnc,
     PBYTE* PContent, SIZE_T* PContentSize, UINT64* PTimestamp)
 {
     WCHAR Path[2048];
+    ATELIER_REQUEST_OPTIONS Options;
     PBYTE Response = 0;
     DWORD ResponseLength = 0, StatusCode = 0;
     NTSTATUS Result;
 
     *PContent = 0;
     *PContentSize = 0;
+    *PEnc = FALSE;
     *PTimestamp = 0;
+
+    if (0 != Hash && 0 != HashCch)
+        Hash[0] = L'\0';
 
     /* the dotted document name is used as-is by the API (api.md §4) */
     if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"/doc/%s", DocumentName)))
         return STATUS_OBJECT_NAME_INVALID;
 
-    Result = AtelierRequest(&Ptfs->Client, Ptfs->UserName, Ptfs->Password, L"GET", Path,
-        &Response, &ResponseLength, &StatusCode);
+    Options.Headers = 0;
+    Options.ETag = Hash;
+    Options.ETagCch = HashCch;
+
+    Result = AtelierRequestEx(&Ptfs->Client, Ptfs->UserName, Ptfs->Password, L"GET", Path,
+        &Options, &Response, &ResponseLength, &StatusCode);
     if (!NT_SUCCESS(Result))
         return Result;
+
+    /* a 304 is a conditional GET whose hash still matches the server; the
+     * content must then come from the cache (REQ-FS-017). Without a cached
+     * document this answer is a protocol error.
+     */
+    if (304 == StatusCode)
+    {
+        fail(L"cannot read the document %s: the server answered 304, "
+            L"but no cached content is available", DocumentName);
+        free(Response);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
 
     if (StatusCode < 200 || StatusCode >= 300)
     {
@@ -786,7 +814,7 @@ static NTSTATUS LoadDocument(PTFS* Ptfs, PCWSTR DocumentName,
     }
 
     Result = ParseDocument(Response, ResponseLength, DocumentName,
-        PContent, PContentSize, PTimestamp);
+        PContent, PContentSize, PEnc, PTimestamp);
 
     free(Response);
 
@@ -1468,14 +1496,18 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
 
     if (VOLUME_PATH_DOCUMENT == Path.Kind)
     {
+        WCHAR Hash[256];
+        BOOLEAN Enc = FALSE;
         PBYTE Content = 0;
         SIZE_T ContentSize = 0;
         UINT64 Timestamp = 0;
 
         /* the content is fetched once per open handle and served from memory
-         * (REQ-FS-013, REQ-FS-014)
+         * (REQ-FS-013, REQ-FS-014). The ETag of the answer is the hash of the
+         * document and is kept for the conditional GET and PUT (api.md §6).
          */
-        Result = LoadDocument(Ptfs, Path.DocumentName, &Content, &ContentSize, &Timestamp);
+        Result = LoadDocument(Ptfs, Path.DocumentName, Hash, ARRAYSIZE(Hash), &Enc,
+            &Content, &ContentSize, &Timestamp);
         if (!NT_SUCCESS(Result))
         {
             VolumePathFree(&Path);
@@ -1492,10 +1524,20 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
         memset(FileContext, 0, sizeof * FileContext);
         FileContext->IsDocument = TRUE;
         FileContext->Handle = INVALID_HANDLE_VALUE;
+        FileContext->Hash = L'\0' != Hash[0] ? DupString(Hash) : 0;
+        if (L'\0' != Hash[0] && 0 == FileContext->Hash)
+        {
+            free(Content);
+            free(FileContext);
+            VolumePathFree(&Path);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
         FileContext->DocumentName = Path.DocumentName;
         Path.DocumentName = 0;
         FileContext->Content = Content;
         FileContext->ContentSize = ContentSize;
+        FileContext->Enc = Enc;
+        FileContext->Dirty = FALSE;
         FileContext->Timestamp = Timestamp;
 
         VolumePathFree(&Path);
@@ -1612,6 +1654,7 @@ static VOID Close(FSP_FILE_SYSTEM* FileSystem,
     free(FileContext->Category);
     free(FileContext->PackagePrefix);
     free(FileContext->DocumentName);
+    free(FileContext->Hash);
     free(FileContext->Content);
 
     FspFileSystemDeleteDirectoryBuffer(&FileContext->DirBuffer);

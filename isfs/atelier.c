@@ -285,8 +285,9 @@ NTSTATUS AtelierStatusToNtStatus(DWORD StatusCode)
 /* issues one request against the Atelier server and reads the answer; every
  * request carries the credentials of the mount (REQ-CONN-006, REQ-CONN-009)
  */
-NTSTATUS AtelierRequest(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password,
-    PCWSTR Method, PCWSTR Path, PBYTE* PResponse, DWORD* PResponseLength, DWORD* PStatusCode)
+NTSTATUS AtelierRequestEx(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password,
+    PCWSTR Method, PCWSTR Path, ATELIER_REQUEST_OPTIONS* Options,
+    PBYTE* PResponse, DWORD* PResponseLength, DWORD* PStatusCode)
 {
     HINTERNET Connection = 0, Request = 0;
     PWSTR AuthHeader = 0;
@@ -298,6 +299,9 @@ NTSTATUS AtelierRequest(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password
     *PResponse = 0;
     *PResponseLength = 0;
     *PStatusCode = 0;
+
+    if (0 != Options && 0 != Options->ETag && 0 != Options->ETagCch)
+        Options->ETag[0] = L'\0';
 
     if (FAILED(StringCchPrintfW(FullPath, ARRAYSIZE(FullPath), L"%s%s", Client->BasePath, Path)))
         return STATUS_OBJECT_NAME_INVALID;
@@ -327,6 +331,9 @@ NTSTATUS AtelierRequest(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password
 
     if (!WinHttpAddRequestHeaders(Request, AuthHeader, (DWORD)-1,
         WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE) ||
+        (0 != Options && 0 != Options->Headers && L'\0' != Options->Headers[0] &&
+            !WinHttpAddRequestHeaders(Request, Options->Headers, (DWORD)-1,
+                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) ||
         !WinHttpSendRequest(Request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
             WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(Request, 0))
@@ -344,6 +351,20 @@ NTSTATUS AtelierRequest(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password
             Result = AtelierTransportError(FullPath, GetLastError());
             goto exit;
         }
+    }
+
+    /* the document hash is the ETag of the answer (api.md §6); a server that
+     * sends no hash is not an error, the caller keeps its own state then
+     */
+    if (0 != Options && 0 != Options->ETag && 0 != Options->ETagCch)
+    {
+        DWORD Size = (DWORD)(Options->ETagCch * sizeof(WCHAR));
+
+        if (!WinHttpQueryHeaders(Request, WINHTTP_QUERY_ETAG, WINHTTP_HEADER_NAME_BY_INDEX,
+            Options->ETag, &Size, WINHTTP_NO_HEADER_INDEX))
+            Options->ETag[0] = L'\0';
+        else
+            Options->ETag[Options->ETagCch - 1] = L'\0';
     }
 
     for (;;)
@@ -405,6 +426,14 @@ exit:
     free(Response);
 
     return Result;
+}
+
+/* a request without additional headers and without the hash of the answer */
+NTSTATUS AtelierRequest(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password,
+    PCWSTR Method, PCWSTR Path, PBYTE* PResponse, DWORD* PResponseLength, DWORD* PStatusCode)
+{
+    return AtelierRequestEx(Client, UserName, Password, Method, Path, 0,
+        PResponse, PResponseLength, PStatusCode);
 }
 
 /* mount-time probe: GET /:namespace against the -p address with the -ns

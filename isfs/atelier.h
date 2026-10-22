@@ -49,12 +49,32 @@ VOID AtelierClientClose(ATELIER_CLIENT* Client);
 /* the HTTP status of the server becomes an NTSTATUS (overview §7) */
 NTSTATUS AtelierStatusToNtStatus(DWORD StatusCode);
 
+/* additional headers of one request and the hash of its answer (api.md §6):
+ * Headers is a CRLF separated block, for example L"If-None-Match: <hash>\r\n";
+ * ETag receives the ETag of the answer, which is the document hash.
+ */
+typedef struct
+{
+    PCWSTR Headers; /* additional request headers; 0 for none */
+    PWSTR ETag;     /* receives the ETag of the answer; 0 when not needed */
+    SIZE_T ETagCch; /* capacity of ETag in characters, including the terminator */
+} ATELIER_REQUEST_OPTIONS;
+
 /* issues one request against the Atelier server and reads the answer; every
  * request carries the credentials of the mount (REQ-CONN-006, REQ-CONN-009).
  * The answer is allocated with malloc() and must be freed with free().
  */
 NTSTATUS AtelierRequest(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password,
     PCWSTR Method, PCWSTR Path, PBYTE* PResponse, DWORD* PResponseLength, DWORD* PStatusCode);
+
+/* like AtelierRequest, but sends the headers of Options and returns the ETag
+ * of the answer in Options->ETag (REQ-FS-013, REQ-FS-017, REQ-FS-025). An
+ * answer without ETag is not an error: the string is left empty. HEAD and 304
+ * answers have no body; the caller decides what a 304 means.
+ */
+NTSTATUS AtelierRequestEx(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password,
+    PCWSTR Method, PCWSTR Path, ATELIER_REQUEST_OPTIONS* Options,
+    PBYTE* PResponse, DWORD* PResponseLength, DWORD* PStatusCode);
 
 /* mount-time probe: GET /:namespace against the -p address with the -ns
  * namespace. Fails the mount when the server is unreachable (REQ-MOUNT-021),
