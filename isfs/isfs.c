@@ -89,9 +89,13 @@ typedef struct
     PVOID DirBuffer;
     BOOLEAN IsRoot; /* "\" is the namespace root, a synthetic directory (REQ-MAP-001) */
     BOOLEAN IsSynthetic; /* a synthetic directory: a category or a package level */
+    BOOLEAN IsDocument; /* an opened document: the content is held in memory (REQ-FS-013) */
     PWSTR Category; /* the category of a synthetic directory, e.g. "CLS" */
     PWSTR PackagePrefix; /* the package path of a synthetic directory, e.g. "User" */
-    UINT64 Timestamp; /* the newest document timestamp below the directory */
+    PWSTR DocumentName; /* the canonical dotted name of a document */
+    PBYTE Content; /* the decoded content of a document (REQ-FS-013) */
+    SIZE_T ContentSize; /* the size of Content in bytes (REQ-FS-006) */
+    UINT64 Timestamp; /* the newest document timestamp below the directory, or the document ts */
 } PTFS_FILE_CONTEXT;
 
 /* the volume root is the -ns namespace: WinFsp passes "\" for it, possibly
@@ -131,6 +135,34 @@ static NTSTATUS GetSyntheticDirInfo(FSP_FSCTL_FILE_INFO* FileInfo, UINT64 IndexN
     FileInfo->LastWriteTime = FileInfo->CreationTime;
     FileInfo->ChangeTime = FileInfo->CreationTime;
     FileInfo->IndexNumber = IndexNumber;
+    FileInfo->HardLinks = 0;
+
+    return STATUS_SUCCESS;
+}
+
+/* the metadata of a document is synthesized from the content that was read
+ * and from its server timestamp (REQ-FS-005, REQ-FS-006)
+ */
+static NTSTATUS GetDocumentInfo(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
+    FSP_FSCTL_FILE_INFO* FileInfo)
+{
+    FILETIME Time;
+
+    if (0 == Context->Timestamp)
+        GetSystemTimeAsFileTime(&Time);
+    else
+        ((PLARGE_INTEGER)&Time)->QuadPart = (LONGLONG)Context->Timestamp;
+
+    memset(FileInfo, 0, sizeof *FileInfo);
+    FileInfo->FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    FileInfo->FileSize = (UINT64)Context->ContentSize;
+    FileInfo->AllocationSize = (FileInfo->FileSize + ALLOCATION_UNIT - 1)
+        / ALLOCATION_UNIT * ALLOCATION_UNIT;
+    FileInfo->CreationTime = ((PLARGE_INTEGER)&Time)->QuadPart;
+    FileInfo->LastAccessTime = FileInfo->CreationTime;
+    FileInfo->LastWriteTime = FileInfo->CreationTime;
+    FileInfo->ChangeTime = FileInfo->CreationTime;
+    FileInfo->IndexNumber = HashEntryName(Ptfs->Namespace, Context->DocumentName);
     FileInfo->HardLinks = 0;
 
     return STATUS_SUCCESS;
@@ -464,6 +496,299 @@ static NTSTATUS GetCategoryDescriptors(PTFS* Ptfs, PCWSTR Category,
     Result = CopyDescriptors(Cache->Descriptors, Cache->Count, PDescriptors, PCount);
 
     LeaveCriticalSection(&Cache->Lock);
+
+    return Result;
+}
+
+/* ------------------------------------------------------------------------
+ * The content of a document
+ * ------------------------------------------------------------------------ */
+
+static int Base64Value(char Ch)
+{
+    if (Ch >= 'A' && Ch <= 'Z')
+        return Ch - 'A';
+    if (Ch >= 'a' && Ch <= 'z')
+        return Ch - 'a' + 26;
+    if (Ch >= '0' && Ch <= '9')
+        return Ch - '0' + 52;
+    if ('+' == Ch)
+        return 62;
+    if ('/' == Ch)
+        return 63;
+
+    return -1;
+}
+
+/* decodes the concatenated base64 chunks of a binary document (REQ-FS-016) */
+static NTSTATUS Base64Decode(const char* Text, SIZE_T Length, PBYTE* PData, SIZE_T* PSize)
+{
+    PBYTE Data;
+    SIZE_T Index, Out = 0;
+    UINT32 Accumulator = 0;
+    ULONG Bits = 0;
+
+    *PData = 0;
+    *PSize = 0;
+
+    Data = malloc(Length / 4 * 3 + 3);
+    if (0 == Data)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (Index = 0; Index < Length; Index++)
+    {
+        char Ch = Text[Index];
+        int Value;
+
+        /* a base64 text may be wrapped; the whitespace carries no data */
+        if (' ' == Ch || '\t' == Ch || '\r' == Ch || '\n' == Ch)
+            continue;
+
+        /* the padding only terminates the last chunk */
+        if ('=' == Ch)
+            break;
+
+        Value = Base64Value(Ch);
+        if (Value < 0)
+        {
+            free(Data);
+            return STATUS_INVALID_NETWORK_RESPONSE;
+        }
+
+        Accumulator = (Accumulator << 6) | (UINT32)Value;
+        Bits += 6;
+        if (Bits >= 8)
+        {
+            Bits -= 8;
+            Data[Out++] = (BYTE)(Accumulator >> Bits);
+            Accumulator &= (1u << Bits) - 1;
+        }
+    }
+
+    *PData = Data;
+    *PSize = Out;
+
+    return STATUS_SUCCESS;
+}
+
+/* joins the lines of a text document with a line feed (REQ-FS-015); the
+ * result is UTF-8, as the content is served to the caller
+ */
+static NTSTATUS JoinTextContent(const cJSON* Content, PBYTE* PData, SIZE_T* PSize)
+{
+    int Count = cJSON_GetArraySize(Content);
+    SIZE_T Total = 0;
+    PBYTE Data, Cursor;
+    int Index;
+
+    *PData = 0;
+    *PSize = 0;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        const cJSON* Item = cJSON_GetArrayItem(Content, Index);
+        const char* Line;
+
+        if (!cJSON_IsString(Item))
+            return STATUS_INVALID_NETWORK_RESPONSE;
+
+        Line = cJSON_GetStringValue(Item);
+        Total += strlen(Line);
+        if (Index + 1 < Count)
+            Total++;
+    }
+
+    Data = malloc(Total ? Total : 1);
+    if (0 == Data)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Cursor = Data;
+    for (Index = 0; Index < Count; Index++)
+    {
+        const char* Line = cJSON_GetStringValue(cJSON_GetArrayItem(Content, Index));
+        SIZE_T LineLength = strlen(Line);
+
+        memcpy(Cursor, Line, LineLength);
+        Cursor += LineLength;
+        if (Index + 1 < Count)
+            *Cursor++ = '\n';
+    }
+
+    *PData = Data;
+    *PSize = Total;
+
+    return STATUS_SUCCESS;
+}
+
+/* concatenates the base64 chunks and decodes them (REQ-FS-016) */
+static NTSTATUS DecodeBinaryContent(const cJSON* Content, PBYTE* PData, SIZE_T* PSize)
+{
+    int Count = cJSON_GetArraySize(Content);
+    SIZE_T Total = 0;
+    PBYTE Text, Cursor;
+    NTSTATUS Result;
+    int Index;
+
+    *PData = 0;
+    *PSize = 0;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        const cJSON* Item = cJSON_GetArrayItem(Content, Index);
+
+        if (!cJSON_IsString(Item))
+            return STATUS_INVALID_NETWORK_RESPONSE;
+
+        Total += strlen(cJSON_GetStringValue(Item));
+    }
+
+    Text = malloc(Total + 1);
+    if (0 == Text)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Cursor = Text;
+    for (Index = 0; Index < Count; Index++)
+    {
+        const char* Chunk = cJSON_GetStringValue(cJSON_GetArrayItem(Content, Index));
+        SIZE_T ChunkLength = strlen(Chunk);
+
+        memcpy(Cursor, Chunk, ChunkLength);
+        Cursor += ChunkLength;
+    }
+    Text[Total] = 0;
+
+    Result = Base64Decode((const char*)Text, Total, PData, PSize);
+    free(Text);
+
+    return Result;
+}
+
+/* parses the answer of GET /:namespace/doc/<name> (api.md §5, §8.3.1) */
+static NTSTATUS ParseDocument(PBYTE Response, DWORD ResponseLength, PCWSTR DocumentName,
+    PBYTE* PContent, SIZE_T* PContentSize, UINT64* PTimestamp)
+{
+    cJSON* Root = 0;
+    const cJSON* Status;
+    const cJSON* Errors;
+    const cJSON* Result;
+    const cJSON* DocumentStatus;
+    const cJSON* Enc;
+    const cJSON* Content;
+    const cJSON* Ts;
+    PWSTR Text;
+    NTSTATUS NtStatus;
+
+    *PContent = 0;
+    *PContentSize = 0;
+    *PTimestamp = 0;
+
+    Root = JsonParse((const char*)Response, ResponseLength);
+    if (0 == Root)
+    {
+        fail(L"cannot read the document %s: the answer of the server is not valid JSON",
+            DocumentName);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
+    /* request level errors are logged even when the status is 200 (api.md §3) */
+    Status = cJSON_GetObjectItemCaseSensitive(Root, "status");
+    Errors = cJSON_GetObjectItemCaseSensitive(Status, "errors");
+    if (0 != Errors && cJSON_IsArray(Errors) && 0 != cJSON_GetArraySize(Errors))
+        warn(L"the server reported %d error(s) while the document %s was read",
+            cJSON_GetArraySize(Errors), DocumentName);
+
+    Result = cJSON_GetObjectItemCaseSensitive(Root, "result");
+    if (!cJSON_IsObject(Result))
+    {
+        cJSON_Delete(Root);
+        fail(L"cannot read the document %s: the answer of the server has no result object",
+            DocumentName);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
+    /* a document level status is a soft error reported with HTTP 200 (api.md §8.3.1) */
+    DocumentStatus = cJSON_GetObjectItemCaseSensitive(Result, "status");
+    if (cJSON_IsString(DocumentStatus) && '\0' != *cJSON_GetStringValue(DocumentStatus))
+    {
+        Text = Utf8ToWide(cJSON_GetStringValue(DocumentStatus));
+        fail(L"cannot read the document %s: the server reported an error: %s",
+            DocumentName, 0 != Text ? Text : L"(no details)");
+        free(Text);
+        cJSON_Delete(Root);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
+    Ts = cJSON_GetObjectItemCaseSensitive(Result, "ts");
+    if (cJSON_IsString(Ts))
+    {
+        Text = Utf8ToWide(cJSON_GetStringValue(Ts));
+        if (0 != Text)
+        {
+            ParseTimestamp(Text, PTimestamp);
+            free(Text);
+        }
+    }
+
+    Content = cJSON_GetObjectItemCaseSensitive(Result, "content");
+    if (0 == Content || !cJSON_IsArray(Content))
+    {
+        cJSON_Delete(Root);
+        fail(L"cannot read the document %s: the answer of the server has no content array",
+            DocumentName);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
+    /* enc=false is a line array, enc=true is a base64 chunk array (REQ-FS-015, REQ-FS-016) */
+    Enc = cJSON_GetObjectItemCaseSensitive(Result, "enc");
+    if (cJSON_IsTrue(Enc))
+        NtStatus = DecodeBinaryContent(Content, PContent, PContentSize);
+    else
+        NtStatus = JoinTextContent(Content, PContent, PContentSize);
+
+    if (!NT_SUCCESS(NtStatus))
+        fail(L"cannot read the document %s: its content is not valid", DocumentName);
+
+    cJSON_Delete(Root);
+
+    return NtStatus;
+}
+
+/* reads and decodes one document; the content is allocated and must be freed
+ * with free() (REQ-FS-013, REQ-FS-014)
+ */
+static NTSTATUS LoadDocument(PTFS* Ptfs, PCWSTR DocumentName,
+    PBYTE* PContent, SIZE_T* PContentSize, UINT64* PTimestamp)
+{
+    WCHAR Path[2048];
+    PBYTE Response = 0;
+    DWORD ResponseLength = 0, StatusCode = 0;
+    NTSTATUS Result;
+
+    *PContent = 0;
+    *PContentSize = 0;
+    *PTimestamp = 0;
+
+    /* the dotted document name is used as-is by the API (api.md §4) */
+    if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"/doc/%s", DocumentName)))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    Result = AtelierRequest(&Ptfs->Client, Ptfs->UserName, Ptfs->Password, L"GET", Path,
+        &Response, &ResponseLength, &StatusCode);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    if (StatusCode < 200 || StatusCode >= 300)
+    {
+        fail(L"cannot read the document %s: the server answered HTTP %lu",
+            DocumentName, StatusCode);
+        free(Response);
+        return AtelierStatusToNtStatus(StatusCode);
+    }
+
+    Result = ParseDocument(Response, ResponseLength, DocumentName,
+        PContent, PContentSize, PTimestamp);
+
+    free(Response);
 
     return Result;
 }
@@ -1043,32 +1368,36 @@ static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* FileSystem,
     PWSTR FileName, PUINT32 PFileAttributes,
     PSECURITY_DESCRIPTOR SecurityDescriptor, SIZE_T* PSecurityDescriptorSize)
 {
-    PCWSTR Name, End;
-    ULONG Index;
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
+    VOLUME_PATH Path;
     NTSTATUS Result;
 
-    /* attributes are synthesized as well: nothing is read from the local
-     * file system (REQ-MAP-001)
+    /* attributes are synthesized from the resolved path: a category or a
+     * package level is a directory, a document is a file (REQ-MAP-001,
+     * REQ-FS-005). The resolution also rejects names that do not exist.
      */
     if (0 != PFileAttributes)
     {
-        *PFileAttributes = IsRootFileName(FileName) ?
-            FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
-
-        for (Name = FileName; L'\\' == *Name || L'/' == *Name; Name++)
-            ;
-        for (End = Name; L'\0' != *End && L'\\' != *End && L'/' != *End; End++)
-            ;
-
-        for (Index = 0; Index < ARRAYSIZE(Categories); Index++)
+        Result = ResolveVolumePath(Ptfs, FileName, &Path);
+        if (!NT_SUCCESS(Result))
         {
-            if ((SIZE_T)(End - Name) == wcslen(Categories[Index]) &&
-                0 == _wcsnicmp(Name, Categories[Index], (SIZE_T)(End - Name)))
-            {
-                *PFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-                break;
-            }
+            VolumePathFree(&Path);
+            return Result;
         }
+
+        switch (Path.Kind)
+        {
+        case VOLUME_PATH_ROOT:
+        case VOLUME_PATH_CATEGORY:
+        case VOLUME_PATH_PACKAGE:
+            *PFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+            break;
+        default:
+            *PFileAttributes = FILE_ATTRIBUTE_NORMAL;
+            break;
+        }
+
+        VolumePathFree(&Path);
     }
 
     Result = STATUS_SUCCESS;
@@ -1139,10 +1468,42 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
 
     if (VOLUME_PATH_DOCUMENT == Path.Kind)
     {
-        /* the content of a document is not read yet */
-        warn(L"the document %s cannot be opened yet", Path.DocumentName);
+        PBYTE Content = 0;
+        SIZE_T ContentSize = 0;
+        UINT64 Timestamp = 0;
+
+        /* the content is fetched once per open handle and served from memory
+         * (REQ-FS-013, REQ-FS-014)
+         */
+        Result = LoadDocument(Ptfs, Path.DocumentName, &Content, &ContentSize, &Timestamp);
+        if (!NT_SUCCESS(Result))
+        {
+            VolumePathFree(&Path);
+            return Result;
+        }
+
+        FileContext = malloc(sizeof * FileContext);
+        if (0 == FileContext)
+        {
+            free(Content);
+            VolumePathFree(&Path);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        memset(FileContext, 0, sizeof * FileContext);
+        FileContext->IsDocument = TRUE;
+        FileContext->Handle = INVALID_HANDLE_VALUE;
+        FileContext->DocumentName = Path.DocumentName;
+        Path.DocumentName = 0;
+        FileContext->Content = Content;
+        FileContext->ContentSize = ContentSize;
+        FileContext->Timestamp = Timestamp;
+
         VolumePathFree(&Path);
-        return STATUS_NOT_SUPPORTED;
+
+        *PFileContext = FileContext;
+
+        /* the exact size is the byte length of the decoded content (REQ-FS-006) */
+        return GetDocumentInfo(Ptfs, FileContext, FileInfo);
     }
 
     if (VOLUME_PATH_CATEGORY != Path.Kind && VOLUME_PATH_PACKAGE != Path.Kind)
@@ -1224,10 +1585,10 @@ static VOID Cleanup(FSP_FILE_SYSTEM* FileSystem,
     PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
 
-    /* synthetic directories have no local handle and cannot be deleted
-     * (REQ-MAP-001, REQ-FS-037)
+    /* synthetic directories and documents have no local handle and cannot be
+     * deleted (REQ-MAP-001, REQ-FS-037)
      */
-    if (Context->IsSynthetic)
+    if (Context->IsSynthetic || Context->IsDocument)
         return;
 
     if (Flags & FspCleanupDelete)
@@ -1245,11 +1606,13 @@ static VOID Close(FSP_FILE_SYSTEM* FileSystem,
     PTFS_FILE_CONTEXT* FileContext = FileContext0;
     HANDLE Handle = HandleFromContext(FileContext);
 
-    if (!FileContext->IsSynthetic)
+    if (!FileContext->IsSynthetic && !FileContext->IsDocument)
         CloseHandle(Handle);
 
     free(FileContext->Category);
     free(FileContext->PackagePrefix);
+    free(FileContext->DocumentName);
+    free(FileContext->Content);
 
     FspFileSystemDeleteDirectoryBuffer(&FileContext->DirBuffer);
     free(FileContext);
@@ -1259,8 +1622,31 @@ static NTSTATUS Read(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext, PVOID Buffer, UINT64 Offset, ULONG Length,
     PULONG PBytesTransferred)
 {
+    PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
     OVERLAPPED Overlapped = { 0 };
+
+    /* a document is served from the content held in memory; the API has no
+     * byte ranges (REQ-FS-014)
+     */
+    if (Context->IsDocument)
+    {
+        UINT64 Size = (UINT64)Context->ContentSize;
+
+        if (Offset >= Size)
+        {
+            *PBytesTransferred = 0;
+            return STATUS_SUCCESS;
+        }
+
+        if ((UINT64)Length > Size - Offset)
+            Length = (ULONG)(Size - Offset);
+
+        memcpy(Buffer, Context->Content + (SIZE_T)Offset, Length);
+        *PBytesTransferred = Length;
+
+        return STATUS_SUCCESS;
+    }
 
     Overlapped.Offset = (DWORD)Offset;
     Overlapped.OffsetHigh = (DWORD)(Offset >> 32);
@@ -1332,6 +1718,12 @@ static NTSTATUS GetFileInfo(FSP_FILE_SYSTEM* FileSystem,
                 0 != Context->PackagePrefix ? Context->PackagePrefix :
                 (0 != Context->Category ? Context->Category : L"")),
             Context->Timestamp);
+
+    /* a document has no local handle: its size and timestamp come from the
+     * content buffer and the server ts (REQ-FS-005, REQ-FS-006)
+     */
+    if (Context->IsDocument)
+        return GetDocumentInfo(Ptfs, Context, FileInfo);
 
     return GetFileInfoInternal(HandleFromContext(FileContext), FileInfo);
 }

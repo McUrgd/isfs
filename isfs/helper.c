@@ -57,6 +57,7 @@ ULONG SplitByDelimiter(PCWSTR Text, WCHAR Delimiter1, WCHAR Delimiter2, PWSTR** 
     WCHAR* Buffer;
     PWSTR* Segments;
     WCHAR* Cursor;
+    WCHAR* SegmentStart = 0;
     SIZE_T Index;
     ULONG Count = 0;
     BOOLEAN InSegment = FALSE;
@@ -83,13 +84,15 @@ ULONG SplitByDelimiter(PCWSTR Text, WCHAR Delimiter1, WCHAR Delimiter2, PWSTR** 
             if (InSegment)
             {
                 *Cursor = L'\0';
-                Segments[Count++] = Cursor;
+                Segments[Count++] = SegmentStart;
                 Cursor++;
                 InSegment = FALSE;
             }
         }
         else
         {
+            if (!InSegment)
+                SegmentStart = Cursor;
             *Cursor++ = Ch;
             InSegment = TRUE;
         }

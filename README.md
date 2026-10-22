@@ -28,6 +28,33 @@ Note: the value of `/Fe` and `/Fo` must be attached to the option (no space). Th
 from Visual Studio 2026 (18.x) does not accept `/Fe <name>` and reports
 `D9024: unrecognized source file type`, treating the name as a source file.
 
+=== Mock Atelier server ===
+
+For manual tests without a real Atelier server, `scripts\mock-atelier.ps1` serves the
+read-only subset of the API that the file system uses:
+
+- `GET /api/atelier/v1/<namespace>` - namespace information;
+- `GET /api/atelier/v1/<namespace>/docnames/<category>` - document listing;
+- `GET /api/atelier/v1/<namespace>/doc/<dotted-name>` - document content
+  (text with `enc=false`, binary base64 with `enc=true`).
+
+It listens on loopback and answers 501 to writes, so the write path can be tested later.
+
+Start it:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\mock-atelier.ps1 -Port 18080
+```
+
+Mount the volume against it:
+
+```
+isfs.exe -p 127.0.0.1:18080 -ns USER -user tester -pass secret -m X:
+```
+
+The request log goes to `%TEMP%\isfs-mock-atelier.log` by default; use `-LogFile` to change it.
+The namespace and the exposed documents are defined at the top of the script.
+
 === Third-party ===
 
 - `cjson/` - [cJSON](https://github.com/DaveGamble/cJSON) v1.7.19, MIT license
