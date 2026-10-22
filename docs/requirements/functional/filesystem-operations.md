@@ -21,8 +21,8 @@ Source sections of [`docs/architecture/api.md`](../../architecture/api.md):
 
 > Current state: the repository contains the WinFsp passthrough skeleton
 > (`isfs/isfs.c`); the Atelier-backed volume source is not implemented yet.
-> Every requirement below is therefore `draft`, except REQ-FS-001 and
-> REQ-FS-003, which the current build already satisfies, and the requirements
+> Every requirement below is therefore `draft`, except REQ-FS-001, REQ-FS-003
+> and REQ-FS-004, which the current build already satisfies, and the requirements
 > marked `dropped`.
 
 ## Operation → endpoint map
@@ -99,7 +99,7 @@ Acceptance criteria:
 
 ### REQ-FS-004 — Listings keep the canonical casing of the server
 
-Status: draft
+Status: implemented
 
 A listing must show the document names in the casing used by the server, not the
 casing of the request.
