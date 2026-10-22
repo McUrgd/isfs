@@ -41,6 +41,7 @@
                 "/Fo${workspaceFolder}\\isfs\\",
                 "/Fd${workspaceFolder}\\isfs\\",
                 "${workspaceFolder}\\isfs\\isfs.c",
+                "${workspaceFolder}\\isfs\\helper.c",
                 "${workspaceFolder}\\cjson\\cJSON.c",
                 "/link",
                 "${workspaceFolder}\\passthrough\\lib\\winfsp-x64.lib",
