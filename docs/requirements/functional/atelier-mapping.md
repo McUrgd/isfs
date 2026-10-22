@@ -245,15 +245,15 @@ A generated document must not appear in the tree of the volume.
 
 Acceptance criteria:
 - The listing request does not set `generated=1`; the server default
-  `generated=0` applies (REQ-FS-002).
+  `generated=0` applies.
 - A generated document appears neither in a category listing nor in a package
   level listing.
 - Opening the path of a generated document fails with
   `STATUS_OBJECT_NAME_NOT_FOUND`.
 
-> Cross-reference: REQ-FS-002 states the same behaviour from the file system
-> side; the requirement above adds that a generated document has no path in the
-> tree at all, neither in a category nor in a package level.
+> Cross-reference: REQ-FS-002 stated the same behaviour from the file system
+> side; it is dropped as a duplicate, so this requirement is the single place
+> that defines the behaviour.
 
 ### REQ-MAP-012 — The segments of a name are used verbatim
 

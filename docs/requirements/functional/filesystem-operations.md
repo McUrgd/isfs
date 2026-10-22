@@ -20,9 +20,10 @@ Source sections of [`docs/architecture/api.md`](../../architecture/api.md):
 §8.3 (documents), §12 (implementation notes and discrepancies).
 
 > Current state: the repository contains the WinFsp passthrough skeleton
-> (`isfs/isfs.c`); the Atelier-backed volume source is not implemented yet. Every
-> requirement below is therefore `draft` unless it records an intentional
-> non-support.
+> (`isfs/isfs.c`); the Atelier-backed volume source is not implemented yet.
+> Every requirement below is therefore `draft`, except REQ-FS-001 and
+> REQ-FS-003, which the current build already satisfies, and the requirements
+> marked `dropped`.
 
 ## Operation → endpoint map
 
@@ -50,7 +51,7 @@ below and mirrors overview §4.2.
 
 ### REQ-FS-001 — A category listing is served by the category listing endpoint
 
-Status: draft
+Status: implemented
 
 Listing the contents of a category directory must be served by
 `GET /:namespace/docnames/:cat` and must return exactly the documents of that
@@ -68,7 +69,7 @@ Acceptance criteria:
 
 ### REQ-FS-002 — Generated documents are not listed
 
-Status: draft
+Status: dropped
 
 Document listings must exclude generated documents, because the server hides them
 by default and generated sources are not meant to be edited as files.
@@ -80,9 +81,13 @@ Acceptance criteria:
 - A generated document is not reachable by opening its path; the request fails with
   `STATUS_OBJECT_NAME_NOT_FOUND`.
 
+> Rationale: duplicate of REQ-MAP-011 ("Generated documents are not exposed"),
+> which states the same behaviour from the mapping side and stays in force. The
+> ID is retired and is not reused.
+
 ### REQ-FS-003 — The size of a listed document is reported as 0
 
-Status: draft
+Status: implemented
 
 A directory listing reports the size of a document as 0, because `GetDocNames`
 returns no size and every exact size would cost a content download.
