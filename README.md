@@ -20,7 +20,7 @@ The VS Code build task (`.vscode/tasks.json`, Ctrl+Shift+B) compiles and links w
 ```
 cl /nologo /Zi /MT /D_DEBUG /D_CONSOLE /DUNICODE /D_UNICODE ^
    /I passthrough /I . ^
-   /Feisfs\isfs.exe /Foisfs\ isfs\isfs.c isfs\helper.c cjson\cJSON.c ^
+   /Feisfs\isfs.exe /Foisfs\ isfs\isfs.c isfs\atelier.c isfs\helper.c cjson\cJSON.c ^
    /link passthrough\lib\winfsp-x64.lib advapi32.lib winhttp.lib
 ```
 

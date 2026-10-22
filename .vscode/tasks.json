@@ -41,6 +41,7 @@
                 "/Fo${workspaceFolder}\\isfs\\",
                 "/Fd${workspaceFolder}\\isfs\\",
                 "${workspaceFolder}\\isfs\\isfs.c",
+                "${workspaceFolder}\\isfs\\atelier.c",
                 "${workspaceFolder}\\isfs\\helper.c",
                 "${workspaceFolder}\\cjson\\cJSON.c",
                 "/link",
