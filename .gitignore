@@ -9,3 +9,4 @@
 *.lib
 *.nativecodeanalysis.xml
 winfsp-x64.dll
+debug.log
