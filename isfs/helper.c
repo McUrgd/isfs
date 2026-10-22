@@ -339,8 +339,25 @@ int CategoryIndex(PCWSTR Category)
     ULONG Index;
 
     for (Index = 0; Index < CATEGORY_COUNT; Index++)
-        if (0 == _wcsicmp(Category, Categories[Index]))
+        if (EqualsNameIgnoreCase(Category, Categories[Index]))
             return (int)Index;
 
     return -1;
+}
+
+/* the comparison is ordinal and invariant, not locale dependent: _wcsicmp in
+ * the "C" locale folds only ASCII, so a non-ASCII path in a different casing
+ * would not resolve, while NTFS treats it as the same name (REQ-FS-004)
+ */
+BOOL EqualsNameIgnoreCase(PCWSTR Left, PCWSTR Right)
+{
+    if (0 == Left || 0 == Right)
+        return FALSE;
+
+    return CSTR_EQUAL == CompareStringOrdinal(Left, -1, Right, -1, TRUE);
+}
+
+BOOL EqualsCharIgnoreCase(WCHAR Left, WCHAR Right)
+{
+    return CSTR_EQUAL == CompareStringOrdinal(&Left, 1, &Right, 1, TRUE);
 }

@@ -70,4 +70,15 @@ BOOL ParseTimestamp(PCWSTR Ts, UINT64* PFileTime);
 /* the index of a category in Categories, or -1 */
 int CategoryIndex(PCWSTR Category);
 
+/* compares two names case-insensitively with the invariant Unicode case table,
+ * which is the semantics of NTFS; the C runtime comparison depends on the
+ * locale and does not fold non-ASCII names (REQ-FS-004, REQ-MAP-009)
+ */
+BOOL EqualsNameIgnoreCase(PCWSTR Left, PCWSTR Right);
+
+/* compares two characters case-insensitively with the invariant table; used by
+ * the wildcard matcher of the listings (REQ-FS-004)
+ */
+BOOL EqualsCharIgnoreCase(WCHAR Left, WCHAR Right);
+
 #endif /* ISFS_HELPER_H */

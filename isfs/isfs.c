@@ -195,7 +195,7 @@ static BOOLEAN PtfsMatchPattern(PCWSTR Pattern, PCWSTR Name)
         if (L'\0' == *Name)
             return FALSE;
 
-        if (L'?' != *Pattern && towupper(*Pattern) != towupper(*Name))
+        if (L'?' != *Pattern && !EqualsCharIgnoreCase(*Pattern, *Name))
             return FALSE;
 
         Pattern++;
@@ -837,7 +837,7 @@ static NTSTATUS AddDirEntry(PTFS_DIR_ENTRY** PEntries, ULONG* PCount, ULONG* PCa
     {
         Entry = &(*PEntries)[Index];
 
-        if (0 != _wcsicmp(Entry->Name, Name))
+        if (!EqualsNameIgnoreCase(Entry->Name, Name))
             continue;
 
         if (Entry->IsDirectory && IsDirectory)
@@ -937,7 +937,7 @@ static NTSTATUS BuildCategoryEntries(PTFS* Ptfs, PCWSTR Category, PCWSTR Prefix,
          * (REQ-MAP-010)
          */
         for (SegmentIndex = 0; SegmentIndex < AcceptedCount; SegmentIndex++)
-            if (0 == _wcsicmp(Accepted[SegmentIndex], Descriptor->Name))
+            if (EqualsNameIgnoreCase(Accepted[SegmentIndex], Descriptor->Name))
             {
                 warn(L"%s: the document %s is hidden, because %s differs from it only by case",
                     Category, Descriptor->Name, Accepted[SegmentIndex]);
@@ -992,7 +992,7 @@ static NTSTATUS BuildCategoryEntries(PTFS* Ptfs, PCWSTR Category, PCWSTR Prefix,
         if (PackageCount < PrefixCount)
             Match = FALSE;
         for (SegmentIndex = 0; Match && SegmentIndex < PrefixCount; SegmentIndex++)
-            if (0 != _wcsicmp(Segments[SegmentIndex], PrefixSegments[SegmentIndex]))
+            if (!EqualsNameIgnoreCase(Segments[SegmentIndex], PrefixSegments[SegmentIndex]))
                 Match = FALSE;
 
         if (Match)
@@ -1163,7 +1163,7 @@ static NTSTATUS ResolveCategoryPath(PTFS* Ptfs, PCWSTR Category, PWSTR* Segments
         if (PackageCount >= Count)
         {
             for (SegmentIndex = 0; SegmentIndex < Count; SegmentIndex++)
-                if (0 != _wcsicmp(DocumentSegments[SegmentIndex], Segments[SegmentIndex]))
+                if (!EqualsNameIgnoreCase(DocumentSegments[SegmentIndex], Segments[SegmentIndex]))
                 {
                     Match = FALSE;
                     break;
@@ -1184,9 +1184,9 @@ static NTSTATUS ResolveCategoryPath(PTFS* Ptfs, PCWSTR Category, PWSTR* Segments
         /* the path is a document */
         Match = (PackageCount == Count - 1);
         for (SegmentIndex = 0; Match && SegmentIndex + 1 < Count; SegmentIndex++)
-            if (0 != _wcsicmp(DocumentSegments[SegmentIndex], Segments[SegmentIndex]))
+            if (!EqualsNameIgnoreCase(DocumentSegments[SegmentIndex], Segments[SegmentIndex]))
                 Match = FALSE;
-        if (Match && 0 == _wcsicmp(DocumentSegments[DocumentSegmentCount - 1], Segments[Count - 1]))
+        if (Match && EqualsNameIgnoreCase(DocumentSegments[DocumentSegmentCount - 1], Segments[Count - 1]))
         {
             Path->Kind = VOLUME_PATH_DOCUMENT;
             Path->DocumentName = DupString(Descriptors[Index].Name);
