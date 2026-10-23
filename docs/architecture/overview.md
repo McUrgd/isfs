@@ -152,9 +152,9 @@ have no filesystem semantics and are not used.
 |---|---|---|---|
 | Mount / volume info | `GetVolumeInfo` | `GET /:namespace` (probe of the `-ns` namespace) | no quota API; report `TotalSize = FreeSize = 0` ("size unknown") and label `ISFS` |
 | Enumerate root | `ReadDirectory` | `GET /:namespace/docnames` | category directories derived from the document list; no namespace lookup |
-| Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 unless cached/prefetched; package levels are derived from the names of the listing (§3.1) |
-| Stat (path) | `GetFileInfo`, `GetSecurityByName` | `HEAD /:namespace/doc/<name>` then `GET` when size is required | timestamps from `ts`; size requires content |
-| Open existing | `Open` | `HEAD` / `GET` document | load content once per handle; serve ranges from memory |
+| Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 (REQ-FS-003); package levels are derived from the names of the listing (§3.1) |
+| Stat (path) | `GetFileInfo`, `GetSecurityByName` | none | attributes and the full-access descriptor are synthesized; no stat metadata is collected, size is 0 until content is fetched |
+| Open existing | `Open` | `GET /:namespace/doc/<name>` | load content once per handle and keep its ETag; serve ranges from memory |
 | Read | `Read` | none | content is held by the open handle; Atelier has no range read, so the whole document was fetched at open |
 | Create new | `Create` | none until flush | do not `PUT` on open; an untouched new file is written as empty on cleanup |
 | Write / append / update | `Write` | buffer in memory; `PUT` on `Flush`/`Cleanup` | Atelier replaces the whole document |
@@ -261,12 +261,15 @@ Rules used by the filesystem:
 ## 6. Metadata synthesis
 
 WinFsp requires a full `FSP_FSCTL_FILE_INFO` for every entry. Atelier provides only name,
-category, database and timestamp; the rest is synthesized.
+category, database and timestamp; the rest is synthesized. Stat by name collects no
+metadata: it reports the synthesized attributes and the full-access descriptor, while the
+size is 0 until the content is fetched. The fields below describe an entry of a listing or
+of an open handle.
 
 | FileInfo field | Source / rule |
 |---|---|
 | `FileAttributes` | `FILE_ATTRIBUTE_DIRECTORY` for synthetic dirs, `FILE_ATTRIBUTE_NORMAL` (optionally `ARCHIVE`) for documents |
-| `FileSize` | UTF-8 byte length of the encoded document; exact after content is fetched, 0 in directory listings until then |
+| `FileSize` | 0 for stat and directory listings; the UTF-8 byte length of the decoded content once `Open` has fetched it |
 | `AllocationSize` | `FileSize` rounded up to 4096 bytes |
 | `CreationTime` | document `ts` converted to FILETIME |
 | `LastAccessTime` | document `ts` |
@@ -284,10 +287,9 @@ the requirements for diagnostics.
 Accurate sizes are expensive: `GetDocNames` does not return them, and each size requires a
 content download. V1 behavior:
 
-- directory enumeration reports size 0 for documents that are not cached;
-- opening or stat-ing a file fetches content and reports the exact size;
-- an optional `prefetchSizes` mode uses `POST /:namespace/docs` to warm a directory in one
-  request, bounded by a configurable byte/file limit.
+- directory enumeration and stat report size 0;
+- opening a file fetches content and reports the exact size for that handle;
+- batch prefetch is deferred together with the content cache.
 
 Security descriptors are synthesized: the mounting user gets full access; the descriptor is
 not read from or written to the server.

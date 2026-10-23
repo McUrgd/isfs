@@ -878,7 +878,7 @@ For the filesystem mapping, the essential subset is:
 |---|---|
 | Mount/probe | `GET /:namespace` |
 | Root/namespace/category listing | `GET /:namespace/docnames[/:cat[/:type]]` |
-| Stat / hash | `HEAD /:namespace/doc/<name>` |
+| Stat (attributes and full-access descriptor synthesized; size 0) | none in v1 (`HEAD` is available but not used) |
 | Read | `GET /:namespace/doc/<name>` |
 | Write / create | `PUT /:namespace/doc/<name>` |
 | Delete | `DELETE /:namespace/doc/<name>` |

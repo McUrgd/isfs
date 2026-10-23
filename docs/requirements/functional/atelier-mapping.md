@@ -328,8 +328,10 @@ Acceptance criteria:
 - The kind of the result — directory or file — follows from the match: a
   segment that is the prefix of several names is a package level, a segment that
   matches a name is a document.
-- The path model decides what a path is; the metadata of a document is
-  obtained as described in `filesystem-operations.md` (REQ-FS-005).
+- The path model decides what a path is. Stat does not collect per-document
+  metadata (REQ-FS-005 is dropped): the attributes and the full-access descriptor
+  are synthesized, and the size is 0 until the content is fetched
+  (`filesystem-operations.md`, REQ-FS-003, REQ-FS-006).
 
 ### REQ-MAP-016 — A move between package levels changes the document name
 

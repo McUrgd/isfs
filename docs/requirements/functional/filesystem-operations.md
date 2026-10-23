@@ -33,8 +33,8 @@ below and mirrors overview §4.2.
 | Filesystem operation | WinFsp callback | Atelier call |
 |---|---|---|
 | Enumerate a category | `ReadDirectory` | `GET /:namespace/docnames/:cat` |
-| Stat / timestamps / hash | `GetFileInfo`, `GetSecurityByName` | `HEAD /:namespace/doc/<name>`, `GET` when the size is required |
-| Open for read | `Open` | `HEAD`/`GET /:namespace/doc/<name>` |
+| Stat / security | `GetFileInfo`, `GetSecurityByName` | none — attributes and the full-access descriptor are synthesized; size 0 until content is fetched |
+| Open for read | `Open` | `GET /:namespace/doc/<name>` |
 | Read | `Read` | none — served from the handle buffer |
 | Create | `Create` | none until flush |
 | Write / overwrite | `Write`, `Overwrite` | none — buffered in memory |
@@ -112,19 +112,16 @@ Acceptance criteria:
 
 ### REQ-FS-005 — Stat is answered from the document descriptor
 
-Status: draft
+Status: dropped
 
-The timestamps and attributes of a document must be answered from the document
-descriptor obtained with `HEAD /:namespace/doc/<name>`.
+v1 does not collect per-document stat data: no `HEAD` request is issued, and the
+attributes, the security descriptor and the size reported for a path are
+synthesized locally.
 
-Acceptance criteria:
-- Stat of an existing document issues one `HEAD` request for it.
-- `CreationTime`, `LastWriteTime` and `ChangeTime` are the document `ts` converted
-  to FILETIME.
-- `LastAccessTime` is the document `ts`; there is no content cache that could
-  warm it later (REQ-FS-017 is dropped).
-- A `HEAD` for a document that does not exist fails with
-  `STATUS_OBJECT_NAME_NOT_FOUND`.
+> Rationale: `GetSecurityByName` returns the full-access descriptor and the
+> attributes derived from the path; a directory listing reports size 0
+> (REQ-FS-003). An exact size is available only for an open handle, whose content
+> was fetched (REQ-FS-006). The `HEAD` endpoint of the API is not used in v1.
 
 ### REQ-FS-006 — The size of a document is the byte length of its decoded content
 
@@ -402,8 +399,8 @@ A document must be saved under the condition that the server still holds the
 version that was read when the handle was opened.
 
 Acceptance criteria:
-- The `PUT` carries the hash obtained from the `GET` or `HEAD` of that document
-  in the `If-None-Match` header.
+- The `PUT` carries the hash obtained from the `GET` of that document in the
+  `If-None-Match` header.
 - A `409` from the server fails the flush with `STATUS_FILE_LOCK_CONFLICT` and
   leaves the buffer dirty; the data is not discarded.
 - The buffer content is kept, so the caller can retry after resolving the
@@ -647,9 +644,9 @@ contradicts it.
 
 From overview §12, to be resolved and folded into the requirements above:
 
-- size strategy — the lazy default (0 in listings, exact size after the content
-  was fetched) is implemented by REQ-FS-003 and REQ-FS-006; the batch prefetch
-  belongs to `caching.md`.
+- size strategy — lazy: 0 in listings and stat (REQ-FS-003), exact size for an
+  open handle after the content was fetched (REQ-FS-006); batch prefetch is
+  deferred together with the content cache.
 - conflict policy — resolved for v1 as a per-mount option that is off by default
   (REQ-FS-026).
 - binary detection — resolved for v1 as a content sniffing (REQ-FS-023); the
@@ -666,6 +663,11 @@ part of the file system model rather than forbidden by the server.
 
 Resolved: a create reports the new file as present, with the content of its
 local buffer, before the first flush (REQ-MAP-014).
+
+Resolved: v1 collects no per-document stat data (REQ-FS-005 is dropped).
+`GetSecurityByName` returns the synthesized full-access descriptor and the
+attributes derived from the path; the size reported for a path is 0. The exact
+size appears only for an open handle whose content was fetched (REQ-FS-006).
 
 ## Related documents
 

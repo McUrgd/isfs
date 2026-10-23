@@ -144,7 +144,7 @@ static NTSTATUS GetSyntheticDirInfo(FSP_FSCTL_FILE_INFO* FileInfo, UINT64 IndexN
 }
 
 /* the metadata of a document is synthesized from the content that was read
- * and from its server timestamp (REQ-FS-005, REQ-FS-006)
+ * and from its server timestamp (REQ-FS-006)
  */
 static NTSTATUS GetDocumentInfo(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
     FSP_FSCTL_FILE_INFO* FileInfo)
@@ -1402,7 +1402,9 @@ static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* FileSystem,
 
     /* attributes are synthesized from the resolved path: a category or a
      * package level is a directory, a document is a file (REQ-MAP-001,
-     * REQ-FS-005). The resolution also rejects names that do not exist.
+     * REQ-FS-008). Stat collects no per-document metadata (REQ-FS-005 is
+     * dropped), so only the attributes and the full-access descriptor are
+     * reported here. The resolution also rejects names that do not exist.
      */
     if (0 != PFileAttributes)
     {
@@ -1763,7 +1765,7 @@ static NTSTATUS GetFileInfo(FSP_FILE_SYSTEM* FileSystem,
             Context->Timestamp);
 
     /* a document has no local handle: its size and timestamp come from the
-     * content buffer and the server ts (REQ-FS-005, REQ-FS-006)
+     * content buffer and the server ts (REQ-FS-006)
      */
     if (Context->IsDocument)
         return GetDocumentInfo(Ptfs, Context, FileInfo);
