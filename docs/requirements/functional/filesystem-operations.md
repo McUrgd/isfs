@@ -121,8 +121,8 @@ Acceptance criteria:
 - Stat of an existing document issues one `HEAD` request for it.
 - `CreationTime`, `LastWriteTime` and `ChangeTime` are the document `ts` converted
   to FILETIME.
-- `LastAccessTime` is the document `ts`, or the moment the content cache was
-  warmed, if the content was fetched more recently.
+- `LastAccessTime` is the document `ts`; there is no content cache that could
+  warm it later (REQ-FS-017 is dropped).
 - A `HEAD` for a document that does not exist fails with
   `STATUS_OBJECT_NAME_NOT_FOUND`.
 
@@ -236,8 +236,8 @@ handle are then served from memory.
 Acceptance criteria:
 - The first read on a handle issues the content request for the document.
 - Further reads on the same handle issue no further request.
-- Two handles on the same document may share the content cache entry
-  (`caching.md`); they still never re-read the document from the server.
+- Two handles on the same document each hold their own buffer; an open handle
+  never re-reads the document from the server.
 
 ### REQ-FS-014 — Reads are served from memory, never as server byte ranges
 
@@ -280,15 +280,16 @@ Acceptance criteria:
 
 ### REQ-FS-017 — A conditional read that answers 304 is a success
 
-Status: draft
+Status: dropped
 
-A conditional read whose hash still matches the server must be answered with the
-content already held in the cache.
+ISFS does not perform conditional reads: it keeps no shared content cache, so a
+`304 Not Modified` answer has no content to serve.
 
-Acceptance criteria:
-- A `GET` that carries the stored hash and answers `304` completes successfully.
-- The content served is the cached content.
-- The `304` is not reported to the caller as an error.
+> Rationale: `Open` always fetches the document with `GET` and the content is
+> owned by the handle (REQ-FS-013), so there is no cache entry to revalidate or
+> to return after a `304`. A `304` is therefore treated as a protocol error.
+> Content caching is deferred until a requirement needs it; the ETag of the
+> document is still kept on the handle for conditional writes (REQ-FS-025).
 
 ### REQ-FS-018 — Creating a document issues no request
 
@@ -475,8 +476,7 @@ Deleting a file must remove the document with the same name on the server.
 Acceptance criteria:
 - The close of a handle that was opened with delete-on-close issues
   `DELETE /:namespace/doc/<name>`.
-- A successful delete removes the entry from the descriptor cache and the content
-  cache.
+- A successful delete removes the entry from the descriptor cache.
 - A `DELETE` for a document that does not exist fails with
   `STATUS_OBJECT_NAME_NOT_FOUND`.
 
@@ -506,7 +506,7 @@ Acceptance criteria:
 - The `PUT` carries the content of `A` and its `enc` flag.
 - The `enc` flag and the content of the target are preserved; a binary document
   stays binary.
-- The descriptor and content cache entries of both names are updated.
+- The descriptor cache entries of both names are updated.
 
 ### REQ-FS-033 — A rename is not atomic
 

@@ -793,9 +793,9 @@ static NTSTATUS LoadDocument(PTFS* Ptfs, PCWSTR DocumentName,
     if (!NT_SUCCESS(Result))
         return Result;
 
-    /* a 304 is a conditional GET whose hash still matches the server; the
-     * content must then come from the cache (REQ-FS-017). Without a cached
-     * document this answer is a protocol error.
+    /* ISFS sends no conditional GET because it keeps no content cache
+     * (REQ-FS-017 is dropped). A 304 is therefore a protocol error; it is
+     * handled explicitly, so the empty body is never parsed as JSON.
      */
     if (304 == StatusCode)
     {

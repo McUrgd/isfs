@@ -68,7 +68,7 @@ NTSTATUS AtelierRequest(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Password
     PCWSTR Method, PCWSTR Path, PBYTE* PResponse, DWORD* PResponseLength, DWORD* PStatusCode);
 
 /* like AtelierRequest, but sends the headers of Options and returns the ETag
- * of the answer in Options->ETag (REQ-FS-013, REQ-FS-017, REQ-FS-025). An
+ * of the answer in Options->ETag (REQ-FS-013, REQ-FS-025). An
  * answer without ETag is not an error: the string is left empty. HEAD and 304
  * answers have no body; the caller decides what a 304 means.
  */

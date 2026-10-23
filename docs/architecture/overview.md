@@ -155,7 +155,7 @@ have no filesystem semantics and are not used.
 | Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 unless cached/prefetched; package levels are derived from the names of the listing (§3.1) |
 | Stat (path) | `GetFileInfo`, `GetSecurityByName` | `HEAD /:namespace/doc/<name>` then `GET` when size is required | timestamps from `ts`; size requires content |
 | Open existing | `Open` | `HEAD` / `GET` document | load content once per handle; serve ranges from memory |
-| Read | `Read` | `GET` document (on cache miss) | Atelier has no range read; whole document is fetched |
+| Read | `Read` | none | content is held by the open handle; Atelier has no range read, so the whole document was fetched at open |
 | Create new | `Create` | none until flush | do not `PUT` on open; an untouched new file is written as empty on cleanup |
 | Write / append / update | `Write` | buffer in memory; `PUT` on `Flush`/`Cleanup` | Atelier replaces the whole document |
 | Overwrite / truncate | `Overwrite`, `SetFileSize` | `PUT` with empty or truncated content | extending beyond current size is rejected |
@@ -269,7 +269,7 @@ category, database and timestamp; the rest is synthesized.
 | `FileSize` | UTF-8 byte length of the encoded document; exact after content is fetched, 0 in directory listings until then |
 | `AllocationSize` | `FileSize` rounded up to 4096 bytes |
 | `CreationTime` | document `ts` converted to FILETIME |
-| `LastAccessTime` | document `ts` (or current time when the cache was warmed) |
+| `LastAccessTime` | document `ts` |
 | `LastWriteTime` | document `ts` |
 | `ChangeTime` | document `ts` |
 | `IndexNumber` | stable hash (FNV-1a 64) of `namespace + "\0" + document name` (the dotted Atelier name of §3.1, not the path) |
@@ -327,15 +327,16 @@ there is no namespace cache.
 
 - **Document descriptor cache** — per category: entries from
   `GetDocNames` (`name`, `cat`, `ts`, `db`, `gen`), TTL 30 s by default.
-- **Content cache** — keyed by `(document name, hash/ts)`, LRU with a configurable
-  byte limit (default 64 MiB). A conditional `GET` with the stored hash returns `304` and
-  avoids re-downloading unchanged content.
+- **Content cache** — deferred for v1: ISFS keeps no shared content cache, because
+  `Open` owns the content through its handle and `REQ-FS-017` (conditional `GET` and
+  `304`) is dropped. A later version can add an LRU cache keyed by
+  `(document name, hash/ts)` with a configurable byte limit.
 - **Dirty buffers** — per open handle, flushed on demand. Multiple handles to the same
   document can overwrite each other; the conditional `PUT` turns the loser into `409`
   rather than silent data loss.
 - **External change detection** — `POST /:namespace/modified/CLS` compares database hashes
-  and returns changed class names. It only supports `CLS`; for other categories the TTL and
-  conditional `GET` are used. Results invalidate descriptor and content entries.
+  and returns changed class names. It only supports `CLS`; for other categories the TTL is
+  used. Results invalidate descriptor entries.
 
 Local mutations invalidate affected entries immediately: writes update the document cache
 from the `PUT` response; deletes remove the entry; renames remove both source and target
