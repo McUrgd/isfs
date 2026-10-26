@@ -366,8 +366,7 @@ entries.
 
 - Never log document content or secrets.
 - Log cache decisions (hit/miss/304/invalidate) at debug level.
-- Expose the effective configuration (server URL, read-only mode, TTLs, cache limits) at
-  startup.
+- Expose the effective configuration (server URL, TTLs, cache limits) at startup.
 - Keep the Atelier request/response correlation in one log scope per filesystem operation,
   so a WinFsp callback can be traced end to end.
 - Mount failures (`401`, DNS, TLS, timeout, wrong or inaccessible `-ns` namespace) must

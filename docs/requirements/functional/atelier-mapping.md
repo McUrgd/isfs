@@ -201,7 +201,7 @@ Acceptance criteria:
 
 ### REQ-MAP-009 — The lookup is case-insensitive on every level
 
-Status: draft
+Status: implemented
 
 The resolution of a path must be case-insensitive on every level of the path,
 while the canonical casing of the server is kept in the results.

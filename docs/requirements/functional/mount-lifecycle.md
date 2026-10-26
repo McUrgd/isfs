@@ -27,7 +27,6 @@ service parameters and an interactive prompt are not supported in v1
 | Credentials: login (`-user`) | yes | — | REQ-MOUNT-010, 012 |
 | Credentials: password (`-pass`) | yes | — | REQ-MOUNT-010, 012 |
 | Connect/read timeout | no | 30 s | REQ-MOUNT-021 |
-| Read-only mode | no | off | REQ-MOUNT-020 |
 
 ## Requirements
 
@@ -194,7 +193,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-019 — Case-insensitive path resolution
 
-Status: draft
+Status: implemented
 
 Name lookup through the mounted volume must be case-insensitive while preserving the
 server's canonical casing in listings.
@@ -203,18 +202,16 @@ Acceptance criteria:
 - `\cls\user\person.cls` resolves to `\CLS\User\Person.cls`.
 - Enumeration shows `CLS`, `User` and `Person.cls`, not the case used by the caller.
 
-### REQ-MOUNT-020 — Read-only mount
+### REQ-MOUNT-020 — Read-only mount — dropped
 
-Status: draft
+Status: dropped
 
-ISFS must support a mount-time read-only mode in which all mutating operations are refused.
-
-Acceptance criteria:
-- In read-only mode, create, write, rename, and delete requests fail with
-  `STATUS_MEDIA_WRITE_PROTECTED` (or the equivalent access-denied status chosen with
-  `errors-diagnostics.md`).
-- Reads and directory listings behave exactly as in read-write mode.
-- Read-only mode is reported in the startup configuration log (overview §10).
+A mount-time read-only mode is intentionally unsupported in v1: the mount is always
+read-write. Rationale: the write right is enforced by the server, which answers `403` for a
+namespace or a document the account may not modify, and that answer already fails the
+operation with `STATUS_ACCESS_DENIED` (REQ-CONN-016); a client-side switch would duplicate
+the server's ACL model, could contradict it, and would give a false sense of protection
+(REQ-CONN-017), with no v1 consumer that needs it.
 
 ### REQ-MOUNT-021 — Actionable mount failure diagnostics
 
@@ -304,9 +301,8 @@ Acceptance criteria:
 
 ## Open decisions affecting this area
 
-From overview §12, to be resolved and folded into the requirements above:
-
-- mount-wide read-only mode (REQ-MOUNT-020).
+Dropped: a mount-wide read-only mode is not supported in v1; write protection comes from
+the server, which answers `403` (REQ-MOUNT-020, REQ-CONN-016).
 
 Resolved: authentication uses a login and password passed as the `-user` and `-pass`
 parameters of `isfs.exe`, kept in memory only (REQ-MOUNT-010).
