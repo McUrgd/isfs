@@ -43,13 +43,11 @@
 /* the lifetime of a document descriptor cache entry (overview §8) */
 #define DESCRIPTOR_CACHE_TTL_MS         30000
 #define ALLOCATION_UNIT                 4096
-#define FULLPATH_SIZE                   (MAX_PATH + FSP_FSCTL_TRANSACT_PATH_SIZEMAX / sizeof(WCHAR))
 
 #define info(format, ...)               FspServiceLog(EVENTLOG_INFORMATION_TYPE, format, __VA_ARGS__)
 #define warn(format, ...)               FspServiceLog(EVENTLOG_WARNING_TYPE, format, __VA_ARGS__)
 #define fail(format, ...)               FspServiceLog(EVENTLOG_ERROR_TYPE, format, __VA_ARGS__)
 
-#define ConcatPath(Ptfs, FN, FP)        (0 == StringCbPrintfW(FP, sizeof FP, L"%s%s", Ptfs->BaseUrl, FN))
 #define HandleFromContext(FC)           (((PTFS_FILE_CONTEXT *)(FC))->Handle)
 
 /* the categories of the volume are declared in helper.h (Categories and
@@ -990,9 +988,12 @@ static BOOLEAN AddTextLine(cJSON* Content, const char* Line, SIZE_T Length)
 }
 
 /* builds the JSON body of a save (REQ-FS-021) and reports the encoding that
- * the buffer was given (REQ-FS-023)
+ * the buffer was given (REQ-FS-023). PreserveEnc keeps the encoding that the
+ * document has on the server: a rename carries the enc flag of its source
+ * over to the target, so a binary document stays binary (REQ-FS-032); a save
+ * of an edited buffer asks for the encoding of the content instead.
  */
-static NTSTATUS BuildRequestBody(PTFS_FILE_CONTEXT* Context,
+static NTSTATUS BuildRequestBody(PTFS_FILE_CONTEXT* Context, BOOLEAN PreserveEnc,
     char** PBody, DWORD* PBodyLength, BOOLEAN* PEnc)
 {
     cJSON* Root = 0;
@@ -1000,7 +1001,8 @@ static NTSTATUS BuildRequestBody(PTFS_FILE_CONTEXT* Context,
     char* Body = 0;
     PBYTE Normalized = 0;
     SIZE_T NormalizedSize = 0;
-    BOOLEAN Binary = !IsTextContent(Context->Content, Context->ContentSize);
+    BOOLEAN Binary = !IsTextContent(Context->Content, Context->ContentSize) ||
+        (PreserveEnc && Context->Enc);
     NTSTATUS Result = STATUS_INSUFFICIENT_RESOURCES;
 
     *PBody = 0;
@@ -1236,8 +1238,14 @@ static NTSTATUS ParseSavedDocument(PBYTE Response, DWORD ResponseLength, PCWSTR 
  * (REQ-FS-025); the -overwrite option bypasses the check (REQ-FS-026).
  * Returns STATUS_FILE_LOCK_CONFLICT on 409/423/425 and leaves the buffer
  * dirty, so the caller can retry.
+ *
+ * DocumentName is the document that receives the buffer; Conditional decides
+ * whether the hash of the handle is sent as If-None-Match. A rename writes a
+ * different document unconditionally (REQ-FS-034) and preserves the encoding
+ * of the source (REQ-FS-032), so both are parameters.
  */
-static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
+static NTSTATUS SaveDocumentAs(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
+    PCWSTR DocumentName, BOOLEAN Conditional, BOOLEAN PreserveEnc,
     FSP_FSCTL_FILE_INFO* FileInfo)
 {
     char* Body = 0;
@@ -1269,16 +1277,16 @@ static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
     if (!Context->Dirty && !Context->Created)
         return GetDocumentInfo(Ptfs, Context, FileInfo);
 
-    Result = BuildRequestBody(Context, &Body, &BodyLength, &Enc);
+    Result = BuildRequestBody(Context, PreserveEnc, &Body, &BodyLength, &Enc);
     if (!NT_SUCCESS(Result))
     {
-        fail(L"cannot save the document %s: its content cannot be encoded", Context->DocumentName);
+        fail(L"cannot save the document %s: its content cannot be encoded", DocumentName);
         return Result;
     }
 
     if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path),
         Ptfs->IgnoreConflicts ? L"/doc/%s?ignoreConflict=1" : L"/doc/%s",
-        Context->DocumentName)))
+        DocumentName)))
     {
         free(Body);
         return STATUS_OBJECT_NAME_INVALID;
@@ -1292,7 +1300,8 @@ static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
         return STATUS_OBJECT_NAME_INVALID;
     }
 
-    if (!Ptfs->IgnoreConflicts && 0 != Context->Hash && L'\0' != Context->Hash[0])
+    if (Conditional && !Ptfs->IgnoreConflicts &&
+        0 != Context->Hash && L'\0' != Context->Hash[0])
     {
         WCHAR IfNoneMatch[2048];
 
@@ -1325,10 +1334,10 @@ static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
     {
         if (409 == StatusCode)
             fail(L"cannot save the document %s: the server holds another version "
-                L"(HTTP 409); the buffer is kept", Context->DocumentName);
+                L"(HTTP 409); the buffer is kept", DocumentName);
         else
             fail(L"cannot save the document %s: the server answered HTTP %lu",
-                Context->DocumentName, StatusCode);
+                DocumentName, StatusCode);
 
         free(Response);
         return AtelierStatusToNtStatus(StatusCode);
@@ -1336,7 +1345,7 @@ static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
 
     if (ResponseLength > 0)
     {
-        Result = ParseSavedDocument(Response, ResponseLength, Context->DocumentName,
+        Result = ParseSavedDocument(Response, ResponseLength, DocumentName,
             &NewContent, &NewContentSize, &NewEnc, &NewTimestamp, &HasContent);
         free(Response);
         if (!NT_SUCCESS(Result))
@@ -1383,9 +1392,59 @@ static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
      */
     InvalidateCategoryCache(Ptfs, Context->Category);
 
-    info(L"saved the document %s", Context->DocumentName);
+    info(L"saved the document %s", DocumentName);
 
     return GetDocumentInfo(Ptfs, Context, FileInfo);
+}
+
+/* a save of the document that the handle was opened for: the buffer is sent
+ * under the name of the handle and conditional on its hash (REQ-FS-025,
+ * REQ-FS-028)
+ */
+static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
+    FSP_FSCTL_FILE_INFO* FileInfo)
+{
+    return SaveDocumentAs(Ptfs, Context, Context->DocumentName, TRUE, FALSE, FileInfo);
+}
+
+/* deletes one document with DELETE /:namespace/doc/<name> (REQ-FS-030). A
+ * document that the server holds locked is reported as a lock conflict
+ * (REQ-FS-031); the name of the document and the lock are logged.
+ */
+static NTSTATUS DeleteDocument(PTFS* Ptfs, PCWSTR DocumentName)
+{
+    WCHAR Path[2048];
+    PBYTE Response = 0;
+    DWORD ResponseLength = 0, StatusCode = 0;
+    NTSTATUS Result;
+
+    if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"/doc/%s", DocumentName)))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    Result = AtelierRequest(&Ptfs->Client, Ptfs->UserName, Ptfs->Password,
+        L"DELETE", Path, &Response, &ResponseLength, &StatusCode);
+
+    free(Response);
+
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    if (StatusCode < 200 || StatusCode >= 300)
+    {
+        if (404 == StatusCode)
+            warn(L"cannot delete the document %s: it does not exist on the server",
+                DocumentName);
+        else if (423 == StatusCode || 425 == StatusCode)
+            warn(L"cannot delete the document %s: it is locked on the server",
+                DocumentName);
+        else
+            fail(L"cannot delete the document %s: the server answered HTTP %lu",
+                DocumentName, StatusCode);
+
+        return AtelierStatusToNtStatus(StatusCode);
+    }
+
+    return STATUS_SUCCESS;
 }
 
 /* ------------------------------------------------------------------------
@@ -2799,23 +2858,231 @@ static NTSTATUS SetFileSize(FSP_FILE_SYSTEM* FileSystem,
     return GetFileInfoInternal(Handle, FileInfo);
 }
 
+/* Windows rename of a document. The API has no rename call, so the operation
+ * is composed of a GET of the source, a PUT of the target and a DELETE of the
+ * source (REQ-FS-032). The sequence is not atomic: a failure after the PUT
+ * leaves both documents on the server and the duplicate is visible in the next
+ * listing (REQ-FS-033).
+ *
+ * The directories of the volume are synthetic: they cannot be renamed
+ * (REQ-FS-036). The namespace is fixed for the mount, so a rename never
+ * changes it (REQ-FS-035); a copy between namespaces is a copy between two
+ * mounts.
+ *
+ * The handle that performs the rename follows the document: its dirty buffer is
+ * saved first and its name is rebound to the target. Another handle that is
+ * still open on the source keeps the old name, because the file system host
+ * reports the rename to the handle it was issued for only; a flush of such a
+ * handle writes under the old name again.
+ */
 static NTSTATUS Rename(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext,
     PWSTR FileName, PWSTR NewFileName, BOOLEAN ReplaceIfExists)
 {
     PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
-    WCHAR FullPath[FULLPATH_SIZE], NewFullPath[FULLPATH_SIZE];
+    PTFS_FILE_CONTEXT* Context = FileContext;
+    PTFS_FILE_CONTEXT Target;
+    VOLUME_PATH Source, TargetPath;
+    PWSTR Category = 0;
+    PWSTR DocumentName = 0;
+    PWSTR NewCategory = 0;
+    PWSTR NewDocumentName = 0;
+    BOOLEAN TargetExists = FALSE, PutIssued = FALSE, SameHandle;
+    FSP_FSCTL_FILE_INFO FileInfo;
+    NTSTATUS Result;
 
-    if (!ConcatPath(Ptfs, FileName, FullPath))
-        return STATUS_OBJECT_NAME_INVALID;
+    memset(&Source, 0, sizeof Source);
+    memset(&TargetPath, 0, sizeof TargetPath);
+    memset(&Target, 0, sizeof Target);
 
-    if (!ConcatPath(Ptfs, NewFileName, NewFullPath))
-        return STATUS_OBJECT_NAME_INVALID;
+    /* a synthetic directory is not a document: it cannot be renamed and no
+     * request is issued for it (REQ-FS-036)
+     */
+    if (0 != Context && Context->IsSynthetic)
+        return STATUS_NOT_SUPPORTED;
 
-    if (!MoveFileExW(FullPath, NewFullPath, ReplaceIfExists ? MOVEFILE_REPLACE_EXISTING : 0))
-        return FspNtStatusFromWin32(GetLastError());
+    /* the volume is being unmounted: nothing is renamed and no buffer is
+     * written (REQ-MOUNT-023)
+     */
+    if (0 != Ptfs->Stopping)
+        return STATUS_UNEXPECTED_IO_ERROR;
 
-    return STATUS_SUCCESS;
+    /* the source must be a document; a path that names the root, a category or
+     * a package level is a synthetic directory (REQ-FS-036)
+     */
+    Result = ResolveVolumePath(Ptfs, FileName, &Source);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    if (VOLUME_PATH_DOCUMENT != Source.Kind)
+    {
+        Result = STATUS_NOT_SUPPORTED;
+        goto exit;
+    }
+
+    /* the dotted name of the target is reconstructed from its path, so the PUT
+     * carries the Atelier name and not the path (REQ-MAP-016, REQ-FS-035)
+     */
+    Result = ComposeNewDocument(Ptfs, NewFileName, &Category, &DocumentName);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    NewCategory = DupString(Category);
+    NewDocumentName = DupString(DocumentName);
+    if (0 == NewCategory || 0 == NewDocumentName)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    /* the replacement rule of Windows is decided before the source is read
+     * (REQ-FS-034)
+     */
+    Result = ResolveVolumePath(Ptfs, NewFileName, &TargetPath);
+    if (NT_SUCCESS(Result))
+    {
+        if (VOLUME_PATH_DOCUMENT != TargetPath.Kind)
+        {
+            /* a document cannot take the place of a synthetic directory */
+            Result = STATUS_OBJECT_NAME_COLLISION;
+            goto exit;
+        }
+
+        TargetExists = TRUE;
+
+        /* the target is the source under another spelling of the path: the
+         * canonical casing is the one of the server, so nothing is sent
+         * (REQ-MAP-009)
+         */
+        if (EqualsNameIgnoreCase(Source.DocumentName, TargetPath.DocumentName))
+        {
+            Result = STATUS_SUCCESS;
+            goto exit;
+        }
+    }
+    else if (STATUS_OBJECT_NAME_NOT_FOUND != Result)
+        goto exit;
+    else
+        Result = STATUS_SUCCESS;
+
+    /* without the permission of the caller an existing target is not replaced
+     * (REQ-FS-034); the refusal is issued before the GET of the source
+     */
+    if (TargetExists && !ReplaceIfExists)
+    {
+        Result = STATUS_OBJECT_NAME_COLLISION;
+        goto exit;
+    }
+
+    /* the buffer of the handle is the content that the caller sees: a dirty or
+     * created buffer is saved first, so that the source exists on the server
+     * with that content and the sequence below moves it (REQ-FS-028)
+     */
+    SameHandle = 0 != Context && Context->IsDocument &&
+        EqualsNameIgnoreCase(Context->DocumentName, Source.DocumentName);
+    if (SameHandle && (Context->Dirty || Context->Created))
+    {
+        EnterCriticalSection(&Context->Lock);
+        Result = SaveDocument(Ptfs, Context, &FileInfo);
+        LeaveCriticalSection(&Context->Lock);
+        if (!NT_SUCCESS(Result))
+            goto exit;
+    }
+
+    /* GET of the source: the content and the enc flag of the document are what
+     * the target receives (REQ-FS-032). The hash of the source is not needed:
+     * the PUT of the target is not conditional.
+     */
+    Result = LoadDocument(Ptfs, Source.DocumentName, 0, 0,
+        &Target.Enc, &Target.Content, &Target.ContentSize, &Target.Timestamp);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    Target.IsDocument = TRUE;
+    Target.Category = Category;
+    Target.DocumentName = DocumentName;
+    Target.Dirty = TRUE; /* the buffer of the target is new and is sent */
+
+    /* PUT of the target. The write is unconditional, because the rename
+     * replaces the target instead of checking its version (REQ-FS-034) and the
+     * hash of the source says nothing about the target. The enc flag of the
+     * source is preserved, so a binary document stays binary (REQ-FS-032).
+     */
+    PutIssued = TRUE;
+    Result = SaveDocumentAs(Ptfs, &Target, DocumentName, FALSE, TRUE, &FileInfo);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    /* DELETE of the source */
+    Result = DeleteDocument(Ptfs, Source.DocumentName);
+    if (!NT_SUCCESS(Result))
+    {
+        /* the sequence is not atomic: the target holds a copy of the source,
+         * so both documents stay on the server (REQ-FS-033)
+         */
+        fail(L"the document %s was copied to %s, but its old name could not be "
+            L"deleted: both documents remain on the server",
+            Source.DocumentName, DocumentName);
+        goto exit;
+    }
+
+    /* the handle follows the document, so a later flush saves the new name and
+     * a later close does not recreate the old one (REQ-MAP-016, REQ-FS-032)
+     */
+    if (SameHandle)
+    {
+        EnterCriticalSection(&Context->Lock);
+
+        free(Context->DocumentName);
+        Context->DocumentName = NewDocumentName;
+        NewDocumentName = 0;
+        free(Context->Category);
+        Context->Category = NewCategory;
+        NewCategory = 0;
+
+        /* the target holds the content that the PUT wrote, so the answer of the
+         * server is the content of the handle (REQ-FS-027)
+         */
+        free(Context->Content);
+        Context->Content = Target.Content;
+        Target.Content = 0;
+        Context->ContentSize = Target.ContentSize;
+        Context->Enc = Target.Enc;
+        free(Context->Hash);
+        Context->Hash = Target.Hash;
+        Target.Hash = 0;
+        Context->Timestamp = Target.Timestamp;
+        Context->Dirty = FALSE;
+        Context->Created = FALSE;
+
+        LeaveCriticalSection(&Context->Lock);
+    }
+
+    info(L"renamed the document %s to %s", Source.DocumentName, DocumentName);
+
+    Result = STATUS_SUCCESS;
+
+exit:
+    if (PutIssued)
+    {
+        /* the source disappears from its listing and the target appears in its
+         * own (REQ-FS-032); after a partial failure both entries are reloaded,
+         * so the duplicate becomes visible (REQ-FS-033)
+         */
+        InvalidateCategoryCache(Ptfs, Source.Category);
+        InvalidateCategoryCache(Ptfs, Category);
+    }
+
+    free(NewCategory);
+    free(NewDocumentName);
+    free(Category);
+    free(DocumentName);
+    free(Target.Content);
+    free(Target.Hash);
+    VolumePathFree(&TargetPath);
+    VolumePathFree(&Source);
+
+    return Result;
 }
 
 static NTSTATUS GetSecurity(FSP_FILE_SYSTEM* FileSystem,

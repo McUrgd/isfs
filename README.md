@@ -79,6 +79,26 @@ override the free drive letter and the port; the work directory (`%TEMP%\isfs-un
 default) keeps the request log of the mock, the service log and the debug log of isfs. The
 script exits with 0 only when every check passed.
 
+=== Manual check: renaming documents ===
+
+`scripts\rename-test.ps1` is a reproducible manual check of REQ-MAP-016 and REQ-FS-032..036. It
+mounts `isfs\isfs.exe` on a free drive letter against the mock on a free loopback port and
+renames documents the way Explorer and the command line do: a text document into another
+package, a binary document, a rename over an existing document (refused, then allowed with
+`MoveFileEx`), a rename into another category, a rename that only changes the case, a rename of
+a package directory (refused) and a rename through a handle with a dirty buffer. The script
+checks the requests that reach the server, the content of the target document and the
+`enc` flag of binary documents:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\rename-test.ps1
+```
+
+Rebuild `isfs\isfs.exe` first. `-Drive` and `-Port` override the free drive letter and the
+port; the work directory (`%TEMP%\isfs-rename-test` by default) keeps the request log of the
+mock, the service log and the debug log of isfs. The script exits with 0 only when every check
+passed.
+
 === Third-party ===
 
 - `cjson/` - [cJSON](https://github.com/DaveGamble/cJSON) v1.7.19, MIT license
