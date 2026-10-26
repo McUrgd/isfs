@@ -108,8 +108,11 @@ VOID FreeSegments(PWSTR* Segments, ULONG Count)
     if (0 == Segments)
         return;
 
-    /* the segments share one buffer; the first one owns it */
-    free(Segments[0]);
+    /* with no segments the buffer has no owner; segments share one buffer and
+     * the first one owns it
+     */
+    if (0 != Count)
+        free(Segments[0]);
     free(Segments);
 }
 

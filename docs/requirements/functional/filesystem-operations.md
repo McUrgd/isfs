@@ -614,7 +614,7 @@ API has no lock call; the locks that the server holds itself are reported as
 Status: dropped
 
 Sparse files, compression and quotas are intentionally unsupported. Rationale: the
-API has no matching capability, and the volume reports its size as unknown
+API has no matching capability, and the volume reports only a synthetic capacity
 (REQ-MOUNT-008).
 
 ### REQ-FS-043 — An atomic rename — dropped

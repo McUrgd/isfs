@@ -31,14 +31,15 @@ from Visual Studio 2026 (18.x) does not accept `/Fe <name>` and reports
 === Mock Atelier server ===
 
 For manual tests without a real Atelier server, `scripts\mock-atelier.ps1` serves the
-read-only subset of the API that the file system uses:
+endpoints that the file system uses for reading and writing documents:
 
 - `GET /api/atelier/v1/<namespace>` - namespace information;
 - `GET /api/atelier/v1/<namespace>/docnames/<category>` - document listing;
 - `GET /api/atelier/v1/<namespace>/doc/<dotted-name>` - document content
-  (text with `enc=false`, binary base64 with `enc=true`).
-
-It listens on loopback and answers 501 to writes, so the write path can be tested later.
+  (text with `enc=false`, binary base64 with `enc=true`);
+- `PUT /api/atelier/v1/<namespace>/doc/<dotted-name>` - create or replace a
+  document, with the `If-None-Match` conflict check;
+- `DELETE /api/atelier/v1/<namespace>/doc/<dotted-name>` - delete a document.
 
 Start it:
 
@@ -51,6 +52,10 @@ Mount the volume against it:
 ```
 isfs.exe -p 127.0.0.1:18080 -ns USER -user tester -pass secret -m X:
 ```
+
+A save is conditional on the hash of the document that was opened. The
+`-overwrite` option replaces the server version even when it changed
+(`ignoreConflict=1`); it is off by default.
 
 The request log goes to `%TEMP%\isfs-mock-atelier.log` by default; use `-LogFile` to change it.
 The namespace and the exposed documents are defined at the top of the script.

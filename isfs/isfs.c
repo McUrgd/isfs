@@ -33,6 +33,12 @@
 
 #define PROGNAME                        "isfs"
 #define VOLUME_NAME                     "ISFS"
+/* The Atelier API exposes no quota. Windows and applications that pre-check
+ * free space treat a total size of 0 as "no space" and refuse to write, so a
+ * constant synthetic capacity is reported (REQ-MOUNT-008).
+ */
+#define VOLUME_TOTAL_SIZE               (1ULL << 40) /* 1 TiB */
+#define VOLUME_FREE_SIZE                (1ULL << 40) /* 1 TiB */
 #define ATELIER_API_PATH                "/api/atelier/v1"
 /* the lifetime of a document descriptor cache entry (overview §8) */
 #define DESCRIPTOR_CACHE_TTL_MS         30000
@@ -80,17 +86,19 @@ typedef struct
     PWSTR Password; /* password from -pass, memory only (REQ-MOUNT-010) */
     PWSTR Namespace; /* the -ns value, used for the index numbers (REQ-FS-012) */
     ATELIER_CLIENT Client; /* the HTTP client of the mount */
+    BOOLEAN IgnoreConflicts; /* -overwrite: ignoreConflict=1 on every save (REQ-FS-026) */
     PTFS_CATEGORY_CACHE Cache[CATEGORY_COUNT]; /* the descriptor caches */
 } PTFS;
 
 typedef struct
 {
     HANDLE Handle;
+    CRITICAL_SECTION Lock; /* guards the content buffer of a document */
     PVOID DirBuffer;
     BOOLEAN IsRoot; /* "\" is the namespace root, a synthetic directory (REQ-MAP-001) */
     BOOLEAN IsSynthetic; /* a synthetic directory: a category or a package level */
     BOOLEAN IsDocument; /* an opened document: the content is held in memory (REQ-FS-013) */
-    PWSTR Category; /* the category of a synthetic directory, e.g. "CLS" */
+    PWSTR Category; /* the category of a synthetic directory or of a document, e.g. "CLS" */
     PWSTR PackagePrefix; /* the package path of a synthetic directory, e.g. "User" */
     PWSTR DocumentName; /* the canonical dotted name of a document */
     PBYTE Content; /* the decoded content of a document (REQ-FS-013) */
@@ -98,6 +106,7 @@ typedef struct
     PWSTR Hash; /* the ETag of the document, its server hash (api.md §6) */
     BOOLEAN Enc; /* the document is binary (api.md §5) */
     BOOLEAN Dirty; /* the buffer differs from the server content (REQ-FS-020) */
+    BOOLEAN Created; /* the document is new and was never sent to the server (REQ-FS-019) */
     UINT64 Timestamp; /* the newest document timestamp below the directory, or the document ts */
 } PTFS_FILE_CONTEXT;
 
@@ -784,6 +793,7 @@ static NTSTATUS LoadDocument(PTFS* Ptfs, PCWSTR DocumentName,
     if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"/doc/%s", DocumentName)))
         return STATUS_OBJECT_NAME_INVALID;
 
+    memset(&Options, 0, sizeof Options);
     Options.Headers = 0;
     Options.ETag = Hash;
     Options.ETagCch = HashCch;
@@ -819,6 +829,555 @@ static NTSTATUS LoadDocument(PTFS* Ptfs, PCWSTR DocumentName,
     free(Response);
 
     return Result;
+}
+
+/* ------------------------------------------------------------------------
+ * Saving a document
+ *
+ * Windows buffers a document in memory and the server replaces it as a whole
+ * (REQ-FS-020, REQ-FS-021). This section turns the buffer into the JSON body
+ * of PUT /:namespace/doc/<name>, sends it and takes the answer back into the
+ * handle (REQ-FS-025, REQ-FS-027).
+ * ------------------------------------------------------------------------ */
+
+/* a successful save invalidates the listing of its category, so that a new
+ * document appears on the next enumeration (REQ-MAP-014)
+ */
+static VOID InvalidateCategoryCache(PTFS* Ptfs, PCWSTR Category)
+{
+    int Index = CategoryIndex(Category);
+    PTFS_CATEGORY_CACHE* Cache;
+
+    if (Index < 0)
+        return;
+
+    Cache = &Ptfs->Cache[Index];
+
+    EnterCriticalSection(&Cache->Lock);
+    Cache->Valid = FALSE;
+    LeaveCriticalSection(&Cache->Lock);
+}
+
+static const char Base64Alphabet[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* encodes the bytes of a binary document as one base64 chunk (api.md §5); the
+ * result is allocated and must be freed with free()
+ */
+static NTSTATUS Base64Encode(const PBYTE Data, SIZE_T Size, char** PText, SIZE_T* PLength)
+{
+    char* Text;
+    SIZE_T Out = 0, Index;
+
+    *PText = 0;
+    *PLength = 0;
+
+    Text = malloc(Size / 3 * 4 + 5);
+    if (0 == Text)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (Index = 0; Index + 3 <= Size; Index += 3)
+    {
+        Text[Out++] = Base64Alphabet[Data[Index] >> 2];
+        Text[Out++] = Base64Alphabet[((Data[Index] & 0x03) << 4) | (Data[Index + 1] >> 4)];
+        Text[Out++] = Base64Alphabet[((Data[Index + 1] & 0x0f) << 2) | (Data[Index + 2] >> 6)];
+        Text[Out++] = Base64Alphabet[Data[Index + 2] & 0x3f];
+    }
+
+    if (1 == Size - Index)
+    {
+        Text[Out++] = Base64Alphabet[Data[Index] >> 2];
+        Text[Out++] = Base64Alphabet[(Data[Index] & 0x03) << 4];
+        Text[Out++] = '=';
+        Text[Out++] = '=';
+    }
+    else if (2 == Size - Index)
+    {
+        Text[Out++] = Base64Alphabet[Data[Index] >> 2];
+        Text[Out++] = Base64Alphabet[((Data[Index] & 0x03) << 4) | (Data[Index + 1] >> 4)];
+        Text[Out++] = Base64Alphabet[(Data[Index + 1] & 0x0f) << 2];
+        Text[Out++] = '=';
+    }
+
+    Text[Out] = '\0';
+
+    *PText = Text;
+    *PLength = Out;
+
+    return STATUS_SUCCESS;
+}
+
+/* the encoding of a write is chosen from the buffer: valid UTF-8 without a NUL
+ * byte is text, everything else is binary (REQ-FS-023)
+ */
+static BOOLEAN IsTextContent(const PBYTE Data, SIZE_T Size)
+{
+    if (0 == Data || 0 == Size)
+        return TRUE;
+
+    if (0 != memchr(Data, 0, Size))
+        return FALSE;
+
+    /* a document larger than the int range is treated as binary; it cannot be
+     * a text document in practice
+     */
+    if (Size > 0x7fffffff)
+        return FALSE;
+
+    return 0 != MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        (const char*)Data, (int)Size, 0, 0);
+}
+
+/* Windows applications write CRLF; the Atelier line array uses LF
+ * (REQ-FS-022). A lone CR is data and is preserved.
+ */
+static NTSTATUS NormalizeNewlines(const PBYTE Data, SIZE_T Size,
+    PBYTE* PNormalized, SIZE_T* PNormalizedSize)
+{
+    PBYTE Normalized;
+    SIZE_T Index, Out = 0;
+
+    *PNormalized = 0;
+    *PNormalizedSize = 0;
+
+    Normalized = malloc(Size + 1);
+    if (0 == Normalized)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (Index = 0; Index < Size; Index++)
+    {
+        if ('\r' == Data[Index] && Index + 1 < Size && '\n' == Data[Index + 1])
+            continue;
+
+        Normalized[Out++] = Data[Index];
+    }
+
+    Normalized[Out] = '\0';
+
+    *PNormalized = Normalized;
+    *PNormalizedSize = Out;
+
+    return STATUS_SUCCESS;
+}
+
+/* adds one line to the content array of the request body; the line is copied,
+ * because cJSON needs a terminated string (api.md §8.3.3)
+ */
+static BOOLEAN AddTextLine(cJSON* Content, const char* Line, SIZE_T Length)
+{
+    char* Copy = malloc(Length + 1);
+    cJSON* Item;
+
+    if (0 == Copy)
+        return FALSE;
+
+    memcpy(Copy, Line, Length);
+    Copy[Length] = '\0';
+
+    Item = cJSON_CreateString(Copy);
+    free(Copy);
+    if (0 == Item)
+        return FALSE;
+
+    if (!cJSON_AddItemToArray(Content, Item))
+    {
+        cJSON_Delete(Item);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/* builds the JSON body of a save (REQ-FS-021) and reports the encoding that
+ * the buffer was given (REQ-FS-023)
+ */
+static NTSTATUS BuildRequestBody(PTFS_FILE_CONTEXT* Context,
+    char** PBody, DWORD* PBodyLength, BOOLEAN* PEnc)
+{
+    cJSON* Root = 0;
+    cJSON* Content;
+    char* Body = 0;
+    PBYTE Normalized = 0;
+    SIZE_T NormalizedSize = 0;
+    BOOLEAN Binary = !IsTextContent(Context->Content, Context->ContentSize);
+    NTSTATUS Result = STATUS_INSUFFICIENT_RESOURCES;
+
+    *PBody = 0;
+    *PBodyLength = 0;
+    *PEnc = Binary;
+
+    Root = cJSON_CreateObject();
+    if (0 == Root)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    if (0 == cJSON_AddBoolToObject(Root, "enc", Binary))
+        goto exit;
+    Content = cJSON_AddArrayToObject(Root, "content");
+    if (0 == Content)
+        goto exit;
+
+    if (Binary)
+    {
+        char* Encoded = 0;
+        SIZE_T EncodedLength = 0;
+        cJSON* Item;
+
+        Result = Base64Encode(Context->Content, Context->ContentSize, &Encoded, &EncodedLength);
+        if (!NT_SUCCESS(Result))
+            goto exit;
+
+        Item = cJSON_CreateString(Encoded);
+        free(Encoded);
+        if (0 == Item || !cJSON_AddItemToArray(Content, Item))
+        {
+            cJSON_Delete(Item);
+            Result = STATUS_INSUFFICIENT_RESOURCES;
+            goto exit;
+        }
+    }
+    else
+    {
+        const char* Cursor;
+        const char* End;
+
+        Result = NormalizeNewlines(Context->Content, Context->ContentSize,
+            &Normalized, &NormalizedSize);
+        if (!NT_SUCCESS(Result))
+            goto exit;
+
+        /* an empty buffer is an empty line array (REQ-FS-019); a trailing LF
+         * produces a trailing empty line (REQ-FS-015)
+         */
+        Cursor = (const char*)Normalized;
+        End = Cursor + NormalizedSize;
+        while (Cursor < End)
+        {
+            const char* LineEnd = memchr(Cursor, '\n', (SIZE_T)(End - Cursor));
+
+            if (0 == LineEnd)
+                LineEnd = End;
+
+            if (!AddTextLine(Content, Cursor, (SIZE_T)(LineEnd - Cursor)))
+            {
+                Result = STATUS_INSUFFICIENT_RESOURCES;
+                goto exit;
+            }
+
+            Cursor = LineEnd < End ? LineEnd + 1 : End;
+        }
+
+        /* the buffer ended with a LF: the line array ends with an empty
+         * element, which preserves the trailing newline
+         */
+        if (NormalizedSize > 0 && '\n' == Normalized[NormalizedSize - 1])
+            if (!AddTextLine(Content, "", 0))
+            {
+                Result = STATUS_INSUFFICIENT_RESOURCES;
+                goto exit;
+            }
+
+        Result = STATUS_SUCCESS;
+    }
+
+    Body = cJSON_PrintUnformatted(Root);
+    if (0 == Body)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    if (strlen(Body) > 0xffffffff)
+    {
+        Result = STATUS_INVALID_BUFFER_SIZE;
+        goto exit;
+    }
+
+    *PBody = Body;
+    *PBodyLength = (DWORD)strlen(Body);
+    Body = 0;
+    Result = STATUS_SUCCESS;
+
+exit:
+    free(Body);
+    free(Normalized);
+    cJSON_Delete(Root);
+
+    return Result;
+}
+
+/* logs the console output of a save; a source-control hook reports there and
+ * it is never served as file content (REQ-FS-027)
+ */
+static VOID LogDocumentConsole(const cJSON* Root, PCWSTR DocumentName)
+{
+    const cJSON* Console = cJSON_GetObjectItemCaseSensitive(Root, "console");
+    int Count, Index;
+
+    if (!cJSON_IsArray(Console))
+        return;
+
+    Count = cJSON_GetArraySize(Console);
+    for (Index = 0; Index < Count; Index++)
+    {
+        const cJSON* Item = cJSON_GetArrayItem(Console, Index);
+        PWSTR Text;
+
+        if (!cJSON_IsString(Item))
+            continue;
+
+        Text = Utf8ToWide(cJSON_GetStringValue(Item));
+        if (0 == Text)
+            continue;
+
+        info(L"%s: %s", DocumentName, Text);
+        free(Text);
+    }
+}
+
+/* parses the document object of a successful save (api.md §8.3.3). The answer
+ * may carry no content; then HasContent stays FALSE and the buffer of the
+ * handle is kept.
+ */
+static NTSTATUS ParseSavedDocument(PBYTE Response, DWORD ResponseLength, PCWSTR DocumentName,
+    PBYTE* PContent, SIZE_T* PContentSize, BOOLEAN* PEnc, UINT64* PTimestamp,
+    BOOLEAN* PHasContent)
+{
+    cJSON* Root = 0;
+    const cJSON* Status;
+    const cJSON* Errors;
+    const cJSON* Result;
+    const cJSON* DocumentStatus;
+    const cJSON* Content;
+    const cJSON* Ts;
+    PWSTR Text;
+    NTSTATUS ResultStatus;
+
+    *PContent = 0;
+    *PContentSize = 0;
+    *PEnc = FALSE;
+    *PTimestamp = 0;
+    *PHasContent = FALSE;
+
+    Root = JsonParse((const char*)Response, ResponseLength);
+    if (0 == Root)
+    {
+        fail(L"the document %s was saved, but the answer of the server is not valid JSON",
+            DocumentName);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
+    LogDocumentConsole(Root, DocumentName);
+
+    Status = cJSON_GetObjectItemCaseSensitive(Root, "status");
+    Errors = cJSON_GetObjectItemCaseSensitive(Status, "errors");
+    if (0 != Errors && cJSON_IsArray(Errors) && 0 != cJSON_GetArraySize(Errors))
+        warn(L"the server reported %d error(s) while the document %s was saved",
+            cJSON_GetArraySize(Errors), DocumentName);
+
+    Result = cJSON_GetObjectItemCaseSensitive(Root, "result");
+    if (!cJSON_IsObject(Result))
+    {
+        /* the save itself succeeded; only the echo of the document is missing */
+        warn(L"the document %s was saved, but the answer has no result object", DocumentName);
+        cJSON_Delete(Root);
+        return STATUS_SUCCESS;
+    }
+
+    DocumentStatus = cJSON_GetObjectItemCaseSensitive(Result, "status");
+    if (cJSON_IsString(DocumentStatus) && '\0' != *cJSON_GetStringValue(DocumentStatus))
+    {
+        Text = Utf8ToWide(cJSON_GetStringValue(DocumentStatus));
+        fail(L"the document %s was rejected by the server: %s",
+            DocumentName, 0 != Text ? Text : L"(no details)");
+        free(Text);
+        cJSON_Delete(Root);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
+    Ts = cJSON_GetObjectItemCaseSensitive(Result, "ts");
+    if (cJSON_IsString(Ts))
+    {
+        Text = Utf8ToWide(cJSON_GetStringValue(Ts));
+        if (0 != Text)
+        {
+            ParseTimestamp(Text, PTimestamp);
+            free(Text);
+        }
+    }
+
+    Content = cJSON_GetObjectItemCaseSensitive(Result, "content");
+    if (0 == Content || !cJSON_IsArray(Content) || 0 == cJSON_GetArraySize(Content))
+    {
+        /* the content was not echoed (no hook changed it): keep the buffer */
+        cJSON_Delete(Root);
+        return STATUS_SUCCESS;
+    }
+
+    *PEnc = (BOOLEAN)(0 != cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(Result, "enc")));
+    if (*PEnc)
+        ResultStatus = DecodeBinaryContent(Content, PContent, PContentSize);
+    else
+        ResultStatus = JoinTextContent(Content, PContent, PContentSize);
+
+    if (!NT_SUCCESS(ResultStatus))
+        fail(L"the document %s was saved, but its answer content is not valid", DocumentName);
+
+    cJSON_Delete(Root);
+
+    if (NT_SUCCESS(ResultStatus))
+        *PHasContent = TRUE;
+
+    return ResultStatus;
+}
+
+/* the buffer of a handle is sent as one replacement of the document
+ * (REQ-FS-020). The hash of the opened document makes the save conditional
+ * (REQ-FS-025); the -overwrite option bypasses the check (REQ-FS-026).
+ * Returns STATUS_FILE_LOCK_CONFLICT on 409/423/425 and leaves the buffer
+ * dirty, so the caller can retry.
+ */
+static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
+    FSP_FSCTL_FILE_INFO* FileInfo)
+{
+    char* Body = 0;
+    DWORD BodyLength = 0;
+    BOOLEAN Enc = FALSE;
+    WCHAR Path[2048];
+    WCHAR Headers[2048];
+    WCHAR ETag[256];
+    ATELIER_REQUEST_OPTIONS Options;
+    PBYTE Response = 0;
+    DWORD ResponseLength = 0, StatusCode = 0;
+    PBYTE NewContent = 0;
+    SIZE_T NewContentSize = 0;
+    BOOLEAN NewEnc = FALSE, HasContent = FALSE;
+    UINT64 NewTimestamp = 0;
+    NTSTATUS Result;
+
+    /* nothing was written into the buffer: the save sends nothing
+     * (REQ-FS-028); a created file that was never written is stored empty
+     * (REQ-FS-019)
+     */
+    if (!Context->Dirty && !Context->Created)
+        return GetDocumentInfo(Ptfs, Context, FileInfo);
+
+    Result = BuildRequestBody(Context, &Body, &BodyLength, &Enc);
+    if (!NT_SUCCESS(Result))
+    {
+        fail(L"cannot save the document %s: its content cannot be encoded", Context->DocumentName);
+        return Result;
+    }
+
+    if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path),
+        Ptfs->IgnoreConflicts ? L"/doc/%s?ignoreConflict=1" : L"/doc/%s",
+        Context->DocumentName)))
+    {
+        free(Body);
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    /* the endpoint requires application/json, not text/plain (api.md §12) */
+    if (FAILED(StringCchCopyW(Headers, ARRAYSIZE(Headers),
+        L"Content-Type: application/json\r\n")))
+    {
+        free(Body);
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    if (!Ptfs->IgnoreConflicts && 0 != Context->Hash && L'\0' != Context->Hash[0])
+    {
+        WCHAR IfNoneMatch[2048];
+
+        if (FAILED(StringCchPrintfW(IfNoneMatch, ARRAYSIZE(IfNoneMatch),
+            L"If-None-Match: %s\r\n", Context->Hash)) ||
+            FAILED(StringCchCatW(Headers, ARRAYSIZE(Headers), IfNoneMatch)))
+        {
+            free(Body);
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+    }
+
+    memset(&Options, 0, sizeof Options);
+    memset(ETag, 0, sizeof ETag);
+    Options.Headers = Headers;
+    Options.Body = Body;
+    Options.BodyLength = BodyLength;
+    Options.ETag = ETag;
+    Options.ETagCch = ARRAYSIZE(ETag);
+
+    Result = AtelierRequestEx(&Ptfs->Client, Ptfs->UserName, Ptfs->Password,
+        L"PUT", Path, &Options, &Response, &ResponseLength, &StatusCode);
+
+    free(Body);
+
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    if (StatusCode < 200 || StatusCode >= 300)
+    {
+        if (409 == StatusCode)
+            fail(L"cannot save the document %s: the server holds another version "
+                L"(HTTP 409); the buffer is kept", Context->DocumentName);
+        else
+            fail(L"cannot save the document %s: the server answered HTTP %lu",
+                Context->DocumentName, StatusCode);
+
+        free(Response);
+        return AtelierStatusToNtStatus(StatusCode);
+    }
+
+    if (ResponseLength > 0)
+    {
+        Result = ParseSavedDocument(Response, ResponseLength, Context->DocumentName,
+            &NewContent, &NewContentSize, &NewEnc, &NewTimestamp, &HasContent);
+        free(Response);
+        if (!NT_SUCCESS(Result))
+            return Result;
+
+        if (HasContent)
+        {
+            /* a source-control hook may have changed the content: the answer
+             * becomes the content of the document (REQ-FS-027)
+             */
+            free(Context->Content);
+            Context->Content = NewContent;
+            Context->ContentSize = NewContentSize;
+            Context->Enc = NewEnc;
+            NewContent = 0;
+        }
+
+        if (0 != NewTimestamp)
+            Context->Timestamp = NewTimestamp;
+    }
+    else
+    {
+        free(Response);
+    }
+
+    free(Context->Hash);
+    Context->Hash = 0;
+    if (L'\0' != ETag[0])
+    {
+        Context->Hash = DupString(ETag);
+        if (0 == Context->Hash)
+        {
+            Context->Dirty = TRUE;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    Context->Enc = HasContent ? NewEnc : Enc;
+    Context->Dirty = FALSE;
+    Context->Created = FALSE;
+
+    /* the document appears in its category listing on the next enumeration
+     * (REQ-MAP-014)
+     */
+    InvalidateCategoryCache(Ptfs, Context->Category);
+
+    info(L"saved the document %s", Context->DocumentName);
+
+    return GetDocumentInfo(Ptfs, Context, FileInfo);
 }
 
 /* ------------------------------------------------------------------------
@@ -1317,11 +1876,12 @@ static NTSTATUS GetFileInfoInternal(HANDLE Handle, FSP_FSCTL_FILE_INFO* FileInfo
 static NTSTATUS GetVolumeInfo(FSP_FILE_SYSTEM* FileSystem,
     FSP_FSCTL_VOLUME_INFO* VolumeInfo)
 {
-    /* the remote volume has no quota API and no local backing store: 0/0 means
-     * "size unknown" (REQ-MOUNT-008)
+    /* the remote volume has no quota API and no local backing store; a
+     * constant synthetic capacity keeps applications that pre-check free
+     * space from treating the volume as full (REQ-MOUNT-008)
      */
-    VolumeInfo->TotalSize = 0;
-    VolumeInfo->FreeSize = 0;
+    VolumeInfo->TotalSize = VOLUME_TOTAL_SIZE;
+    VolumeInfo->FreeSize = VOLUME_FREE_SIZE;
 
     /* the volume label does not depend on the server (REQ-MOUNT-006) */
     memset(VolumeInfo->VolumeLabel, 0, sizeof VolumeInfo->VolumeLabel);
@@ -1438,11 +1998,153 @@ static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* FileSystem,
     return Result;
 }
 
+/* a document can only be created inside an existing category or package level:
+ * the directories of the volume are synthetic and cannot be created
+ * (REQ-FS-037). The dotted name is composed from the canonical package prefix
+ * and the file name segment.
+ */
+static NTSTATUS ComposeNewDocument(PTFS* Ptfs, PCWSTR FileName,
+    PWSTR* PCategory, PWSTR* PDocumentName)
+{
+    PWSTR* Segments = 0;
+    ULONG Count = 0, Index;
+    int Category = -1;
+    VOLUME_PATH Parent;
+    PWSTR* LeafSegments = 0;
+    ULONG LeafCount = 0;
+    WCHAR ParentPath[2048];
+    WCHAR DocumentName[2048];
+    NTSTATUS Result;
+
+    *PCategory = 0;
+    *PDocumentName = 0;
+
+    Count = SplitByDelimiter(FileName, L'\\', L'/', &Segments);
+    if (Count < 2)
+    {
+        /* a category, the root or a package level is a directory */
+        Result = STATUS_OBJECT_NAME_INVALID;
+        goto exit;
+    }
+
+    Category = CategoryIndex(Segments[0]);
+    if (Category < 0)
+    {
+        Result = STATUS_OBJECT_NAME_NOT_FOUND;
+        goto exit;
+    }
+
+    /* the file name segment must not introduce a package level: package levels
+     * are directories and cannot be created (REQ-MAP-004, REQ-FS-037)
+     */
+    LeafCount = SplitDocumentName(Segments[Count - 1], &LeafSegments);
+    if (0 == LeafCount)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    for (Index = 0; Index < LeafCount; Index++)
+        if (!IsLegalPathSegment(LeafSegments[Index]))
+        {
+            Result = STATUS_OBJECT_NAME_INVALID;
+            goto exit;
+        }
+
+    if (LeafCount > 1)
+    {
+        warn(L"the document %s cannot be created: its name would introduce a package level",
+            Segments[Count - 1]);
+        Result = STATUS_OBJECT_NAME_INVALID;
+        goto exit;
+    }
+
+    if (2 == Count)
+    {
+        if (FAILED(StringCchCopyW(DocumentName, ARRAYSIZE(DocumentName), Segments[1])))
+        {
+            Result = STATUS_OBJECT_NAME_INVALID;
+            goto exit;
+        }
+    }
+    else
+    {
+        /* the parent path must resolve to a category or an existing package
+         * level (REQ-MAP-015)
+         */
+        if (FAILED(StringCchCopyW(ParentPath, ARRAYSIZE(ParentPath), Segments[0])))
+        {
+            Result = STATUS_OBJECT_NAME_INVALID;
+            goto exit;
+        }
+
+        for (Index = 1; Index + 1 < Count; Index++)
+            if (FAILED(StringCchCatW(ParentPath, ARRAYSIZE(ParentPath), L"\\")) ||
+                FAILED(StringCchCatW(ParentPath, ARRAYSIZE(ParentPath), Segments[Index])))
+            {
+                Result = STATUS_OBJECT_NAME_INVALID;
+                goto exit;
+            }
+
+        Result = ResolveVolumePath(Ptfs, ParentPath, &Parent);
+        if (!NT_SUCCESS(Result))
+            goto exit;
+
+        if (VOLUME_PATH_CATEGORY != Parent.Kind && VOLUME_PATH_PACKAGE != Parent.Kind)
+        {
+            VolumePathFree(&Parent);
+            Result = STATUS_OBJECT_NAME_NOT_FOUND;
+            goto exit;
+        }
+
+        if (FAILED(StringCchPrintfW(DocumentName, ARRAYSIZE(DocumentName), L"%s.%s",
+            0 != Parent.PackagePrefix ? Parent.PackagePrefix : Parent.Category,
+            Segments[Count - 1])))
+        {
+            VolumePathFree(&Parent);
+            Result = STATUS_OBJECT_NAME_INVALID;
+            goto exit;
+        }
+
+        VolumePathFree(&Parent);
+    }
+
+    *PCategory = DupString(Categories[Category]);
+    *PDocumentName = DupString(DocumentName);
+    if (0 == *PCategory || 0 == *PDocumentName)
+    {
+        free(*PCategory);
+        free(*PDocumentName);
+        *PCategory = 0;
+        *PDocumentName = 0;
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    Result = STATUS_SUCCESS;
+
+exit:
+    if (0 != Segments)
+        FreeSegments(Segments, Count);
+    if (0 != LeafSegments)
+        FreeSegments(LeafSegments, LeafCount);
+
+    return Result;
+}
+
 static NTSTATUS Create(FSP_FILE_SYSTEM* FileSystem,
     PWSTR FileName, UINT32 CreateOptions, UINT32 GrantedAccess,
     UINT32 FileAttributes, PSECURITY_DESCRIPTOR SecurityDescriptor, UINT64 AllocationSize,
     PVOID* PFileContext, FSP_FSCTL_FILE_INFO* FileInfo)
 {
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
+    PTFS_FILE_CONTEXT* FileContext;
+    VOLUME_PATH Path;
+    PWSTR Category = 0;
+    PWSTR DocumentName = 0;
+    FILETIME Now;
+    NTSTATUS Result;
+
     /* the namespace root already exists and cannot be created (REQ-MAP-001) */
     if (IsRootFileName(FileName))
         return STATUS_OBJECT_NAME_COLLISION;
@@ -1453,12 +2155,52 @@ static NTSTATUS Create(FSP_FILE_SYSTEM* FileSystem,
     if (CreateOptions & FILE_DIRECTORY_FILE)
         return STATUS_NOT_SUPPORTED;
 
-    /* a document is created on the server by the flush of its handle; the
-     * write of a document is not implemented yet (REQ-FS-018)
-     */
-    warn(L"the document %s cannot be created yet", FileName);
+    /* an existing document or directory cannot be created twice */
+    Result = ResolveVolumePath(Ptfs, FileName, &Path);
+    if (NT_SUCCESS(Result))
+    {
+        VolumePathFree(&Path);
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+    if (STATUS_OBJECT_NAME_NOT_FOUND != Result)
+        return Result;
 
-    return STATUS_NOT_SUPPORTED;
+    Result = ComposeNewDocument(Ptfs, FileName, &Category, &DocumentName);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    /* the document exists on the server only after a successful PUT; the
+     * resolution above uses the listing that the stat/open of the new path has
+     * just loaded (REQ-FS-018)
+     */
+    FileContext = malloc(sizeof * FileContext);
+    if (0 == FileContext)
+    {
+        free(Category);
+        free(DocumentName);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    memset(FileContext, 0, sizeof * FileContext);
+    InitializeCriticalSection(&FileContext->Lock);
+    FileContext->Handle = INVALID_HANDLE_VALUE;
+    FileContext->IsDocument = TRUE;
+    FileContext->Category = Category;
+    FileContext->DocumentName = DocumentName;
+    FileContext->Content = 0;
+    FileContext->ContentSize = 0;
+    FileContext->Enc = FALSE;
+    FileContext->Dirty = FALSE;
+    FileContext->Created = TRUE;
+    GetSystemTimeAsFileTime(&Now);
+    FileContext->Timestamp = (UINT64)((PLARGE_INTEGER)&Now)->QuadPart;
+
+    *PFileContext = FileContext;
+
+    /* the created file is reported with the content of its local buffer, which
+     * is empty until the first write (REQ-MAP-014)
+     */
+    return GetDocumentInfo(Ptfs, FileContext, FileInfo);
 }
 
 static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
@@ -1479,6 +2221,7 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
         if (0 == FileContext)
             return STATUS_INSUFFICIENT_RESOURCES;
         memset(FileContext, 0, sizeof * FileContext);
+        InitializeCriticalSection(&FileContext->Lock);
         FileContext->IsRoot = TRUE;
         FileContext->IsSynthetic = TRUE;
         FileContext->Handle = INVALID_HANDLE_VALUE;
@@ -1524,16 +2267,20 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         memset(FileContext, 0, sizeof * FileContext);
+        InitializeCriticalSection(&FileContext->Lock);
         FileContext->IsDocument = TRUE;
         FileContext->Handle = INVALID_HANDLE_VALUE;
         FileContext->Hash = L'\0' != Hash[0] ? DupString(Hash) : 0;
         if (L'\0' != Hash[0] && 0 == FileContext->Hash)
         {
             free(Content);
+            DeleteCriticalSection(&FileContext->Lock);
             free(FileContext);
             VolumePathFree(&Path);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
+        FileContext->Category = Path.Category;
+        Path.Category = 0;
         FileContext->DocumentName = Path.DocumentName;
         Path.DocumentName = 0;
         FileContext->Content = Content;
@@ -1563,6 +2310,7 @@ static NTSTATUS Open(FSP_FILE_SYSTEM* FileSystem,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     memset(FileContext, 0, sizeof * FileContext);
+    InitializeCriticalSection(&FileContext->Lock);
     FileContext->IsSynthetic = TRUE;
     FileContext->Handle = INVALID_HANDLE_VALUE;
     FileContext->Category = Path.Category;
@@ -1586,10 +2334,28 @@ static NTSTATUS Overwrite(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext, UINT32 FileAttributes, BOOLEAN ReplaceFileAttributes, UINT64 AllocationSize,
     FSP_FSCTL_FILE_INFO* FileInfo)
 {
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
+    PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
     FILE_BASIC_INFO BasicInfo = { 0 };
     FILE_ALLOCATION_INFO AllocationInfo = { 0 };
     FILE_ATTRIBUTE_TAG_INFO AttributeTagInfo;
+
+    /* overwriting a document truncates its buffer; no request is issued
+     * (REQ-FS-020)
+     */
+    if (Context->IsDocument)
+    {
+        EnterCriticalSection(&Context->Lock);
+        free(Context->Content);
+        Context->Content = 0;
+        Context->ContentSize = 0;
+        Context->Enc = FALSE;
+        Context->Dirty = TRUE;
+        LeaveCriticalSection(&Context->Lock);
+
+        return GetDocumentInfo(Ptfs, Context, FileInfo);
+    }
 
     if (ReplaceFileAttributes)
     {
@@ -1647,11 +2413,26 @@ static VOID Cleanup(FSP_FILE_SYSTEM* FileSystem,
 static VOID Close(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext0)
 {
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
     PTFS_FILE_CONTEXT* FileContext = FileContext0;
     HANDLE Handle = HandleFromContext(FileContext);
 
+    /* when the save of the flush failed, the close makes one final attempt;
+     * data that is still not acknowledged is discarded (REQ-FS-029)
+     */
+    if (FileContext->IsDocument && (FileContext->Dirty || FileContext->Created))
+    {
+        FSP_FSCTL_FILE_INFO FileInfo;
+
+        EnterCriticalSection(&FileContext->Lock);
+        SaveDocument(Ptfs, FileContext, &FileInfo);
+        LeaveCriticalSection(&FileContext->Lock);
+    }
+
     if (!FileContext->IsSynthetic && !FileContext->IsDocument)
         CloseHandle(Handle);
+
+    DeleteCriticalSection(&FileContext->Lock);
 
     free(FileContext->Category);
     free(FileContext->PackagePrefix);
@@ -1676,10 +2457,15 @@ static NTSTATUS Read(FSP_FILE_SYSTEM* FileSystem,
      */
     if (Context->IsDocument)
     {
-        UINT64 Size = (UINT64)Context->ContentSize;
+        UINT64 Size;
+
+        EnterCriticalSection(&Context->Lock);
+
+        Size = (UINT64)Context->ContentSize;
 
         if (Offset >= Size)
         {
+            LeaveCriticalSection(&Context->Lock);
             *PBytesTransferred = 0;
             return STATUS_SUCCESS;
         }
@@ -1689,6 +2475,8 @@ static NTSTATUS Read(FSP_FILE_SYSTEM* FileSystem,
 
         memcpy(Buffer, Context->Content + (SIZE_T)Offset, Length);
         *PBytesTransferred = Length;
+
+        LeaveCriticalSection(&Context->Lock);
 
         return STATUS_SUCCESS;
     }
@@ -1707,9 +2495,80 @@ static NTSTATUS Write(FSP_FILE_SYSTEM* FileSystem,
     BOOLEAN WriteToEndOfFile, BOOLEAN ConstrainedIo,
     PULONG PBytesTransferred, FSP_FSCTL_FILE_INFO* FileInfo)
 {
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
+    PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
     LARGE_INTEGER FileSize;
     OVERLAPPED Overlapped = { 0 };
+
+    /* a document is written into its in-memory buffer; no request is issued
+     * until the flush (REQ-FS-020)
+     */
+    if (Context->IsDocument)
+    {
+        PBYTE NewContent;
+        SIZE_T NewSize;
+
+        EnterCriticalSection(&Context->Lock);
+
+        if (WriteToEndOfFile)
+            Offset = (UINT64)Context->ContentSize;
+
+        if (ConstrainedIo)
+        {
+            /* paging I/O must not change the size of the file */
+            if (Offset >= (UINT64)Context->ContentSize)
+            {
+                LeaveCriticalSection(&Context->Lock);
+                *PBytesTransferred = 0;
+                return STATUS_SUCCESS;
+            }
+
+            if (Offset + (UINT64)Length > (UINT64)Context->ContentSize)
+                Length = (ULONG)((UINT64)Context->ContentSize - Offset);
+        }
+        else if (Offset > (UINT64)Context->ContentSize)
+        {
+            /* a write at the end of the file is an append and is allowed; an
+             * offset beyond the end would create a hole, which the API cannot
+             * represent (REQ-FS-024)
+             */
+            LeaveCriticalSection(&Context->Lock);
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        if (Offset > (UINT64)-1 - (UINT64)Length)
+        {
+            LeaveCriticalSection(&Context->Lock);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        NewSize = (SIZE_T)(Offset + (UINT64)Length);
+        if (NewSize > Context->ContentSize)
+        {
+            NewContent = realloc(Context->Content, NewSize);
+            if (0 == NewContent)
+            {
+                LeaveCriticalSection(&Context->Lock);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            Context->Content = NewContent;
+            Context->ContentSize = NewSize;
+        }
+
+        if (0 != Length)
+        {
+            memcpy(Context->Content + (SIZE_T)Offset, Buffer, Length);
+            Context->Dirty = TRUE;
+        }
+
+        *PBytesTransferred = Length;
+
+        LeaveCriticalSection(&Context->Lock);
+
+        return GetDocumentInfo(Ptfs, Context, FileInfo);
+    }
 
     if (ConstrainedIo)
     {
@@ -1735,11 +2594,42 @@ NTSTATUS Flush(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext,
     FSP_FSCTL_FILE_INFO* FileInfo)
 {
-    HANDLE Handle = HandleFromContext(FileContext);
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
+    PTFS_FILE_CONTEXT* Context = FileContext;
+    HANDLE Handle;
+    NTSTATUS Result;
 
-    /* we do not flush the whole volume, so just return SUCCESS */
-    if (0 == Handle)
+    /* the whole volume is flushed: there is no local backing store */
+    if (0 == Context)
         return STATUS_SUCCESS;
+
+    Handle = HandleFromContext(FileContext);
+
+    /* a synthetic directory has no state to save */
+    if (Context->IsSynthetic)
+    {
+        if (0 == FileInfo)
+            return STATUS_SUCCESS;
+
+        return GetSyntheticDirInfo(FileInfo,
+            HashEntryName(Ptfs->Namespace,
+                0 != Context->PackagePrefix ? Context->PackagePrefix :
+                (0 != Context->Category ? Context->Category : L"")),
+            Context->Timestamp);
+    }
+
+    /* a document is saved from its buffer, and only when something was
+     * written (REQ-FS-028); a created file is sent even when it stayed empty
+     * (REQ-FS-019)
+     */
+    if (Context->IsDocument)
+    {
+        EnterCriticalSection(&Context->Lock);
+        Result = SaveDocument(Ptfs, Context, FileInfo);
+        LeaveCriticalSection(&Context->Lock);
+
+        return Result;
+    }
 
     if (!FlushFileBuffers(Handle))
         return FspNtStatusFromWin32(GetLastError());
@@ -1778,8 +2668,24 @@ static NTSTATUS SetBasicInfo(FSP_FILE_SYSTEM* FileSystem,
     UINT64 CreationTime, UINT64 LastAccessTime, UINT64 LastWriteTime, UINT64 ChangeTime,
     FSP_FSCTL_FILE_INFO* FileInfo)
 {
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
+    PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
     FILE_BASIC_INFO BasicInfo = { 0 };
+
+    /* the timestamps of a document are the server ts and a synthetic
+     * directory has no times of its own: both are accepted and ignored
+     * (REQ-FS-011)
+     */
+    if (Context->IsSynthetic)
+        return GetSyntheticDirInfo(FileInfo,
+            HashEntryName(Ptfs->Namespace,
+                0 != Context->PackagePrefix ? Context->PackagePrefix :
+                (0 != Context->Category ? Context->Category : L"")),
+            Context->Timestamp);
+
+    if (Context->IsDocument)
+        return GetDocumentInfo(Ptfs, Context, FileInfo);
 
     if (INVALID_FILE_ATTRIBUTES == FileAttributes)
         FileAttributes = 0;
@@ -1803,9 +2709,56 @@ static NTSTATUS SetFileSize(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext, UINT64 NewSize, BOOLEAN SetAllocationSize,
     FSP_FSCTL_FILE_INFO* FileInfo)
 {
+    PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
+    PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
     FILE_ALLOCATION_INFO AllocationInfo;
     FILE_END_OF_FILE_INFO EndOfFileInfo;
+
+    /* the allocation size of a document is not maintained; the size of the
+     * content is (REQ-FS-006)
+     */
+    if (Context->IsDocument)
+    {
+        EnterCriticalSection(&Context->Lock);
+
+        if (NewSize > (UINT64)Context->ContentSize)
+        {
+            /* an allocation may be larger than the content, but a file that is
+             * enlarged cannot be represented: the API replaces a document as a
+             * whole and a write cannot extend it (REQ-FS-024)
+             */
+            LeaveCriticalSection(&Context->Lock);
+            return SetAllocationSize ? GetDocumentInfo(Ptfs, Context, FileInfo) :
+                STATUS_NOT_SUPPORTED;
+        }
+
+        if (NewSize < (UINT64)Context->ContentSize)
+        {
+            if (0 == NewSize)
+            {
+                free(Context->Content);
+                Context->Content = 0;
+            }
+            else
+            {
+                PBYTE Content = realloc(Context->Content, (SIZE_T)NewSize);
+
+                /* a failed shrink keeps the old block; only the logical size
+                 * changes
+                 */
+                if (0 != Content)
+                    Context->Content = Content;
+            }
+
+            Context->ContentSize = (SIZE_T)NewSize;
+            Context->Dirty = TRUE;
+        }
+
+        LeaveCriticalSection(&Context->Lock);
+
+        return GetDocumentInfo(Ptfs, Context, FileInfo);
+    }
 
     if (SetAllocationSize)
     {
@@ -1871,7 +2824,14 @@ static NTSTATUS SetSecurity(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext,
     SECURITY_INFORMATION SecurityInformation, PSECURITY_DESCRIPTOR ModificationDescriptor)
 {
+    PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
+
+    /* the descriptor of every entry is synthesized and read-only
+     * (REQ-FS-010)
+     */
+    if (Context->IsSynthetic || Context->IsDocument)
+        return STATUS_NOT_SUPPORTED;
 
     if (!SetKernelObjectSecurity(Handle, SecurityInformation, ModificationDescriptor))
         return FspNtStatusFromWin32(GetLastError());
@@ -2048,7 +3008,7 @@ static VOID PtfsDelete(PTFS* Ptfs);
  * (REQ-CONN-021)
  */
 static NTSTATUS PtfsCreate(PWSTR Namespace, ATELIER_CLIENT* Client, PWSTR BaseUrl,
-    PWSTR UserName, PWSTR Password,
+    PWSTR UserName, PWSTR Password, BOOLEAN IgnoreConflicts,
     PWSTR MountPoint, UINT32 DebugFlags,
     PTFS** PPtfs)
 {
@@ -2116,6 +3076,11 @@ static NTSTATUS PtfsCreate(PWSTR Namespace, ATELIER_CLIENT* Client, PWSTR BaseUr
         goto exit;
     }
     memcpy(Ptfs->Password, Password, Length);
+
+    /* the conflict policy is a per-mount option that is off by default
+     * (REQ-FS-026)
+     */
+    Ptfs->IgnoreConflicts = IgnoreConflicts;
 
     GetSystemTimeAsFileTime(&CreationTime);
 
@@ -2336,6 +3301,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     PWSTR UserName = 0;
     PWSTR Password = 0;
     PWSTR MountPoint = 0;
+    BOOLEAN IgnoreConflicts = FALSE;
     HANDLE DebugLogHandle = INVALID_HANDLE_VALUE;
     WCHAR NamespaceSegment[MAX_PATH];
     WCHAR BaseUrlBuf[MAX_PATH];
@@ -2364,6 +3330,12 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         if (0 == wcscmp(argp[0], L"-pass"))
         {
             argtos(Password);
+            continue;
+        }
+        /* REQ-FS-026: an explicit opt-in replaces the server version */
+        if (0 == wcscmp(argp[0], L"-overwrite"))
+        {
+            IgnoreConflicts = TRUE;
             continue;
         }
         switch (argp[0][1])
@@ -2465,7 +3437,8 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         goto exit;
     }
 
-    Result = PtfsCreate(Namespace, &Client, BaseUrlBuf, UserName, Password, MountPoint, DebugFlags, &Ptfs);
+    Result = PtfsCreate(Namespace, &Client, BaseUrlBuf, UserName, Password,
+        IgnoreConflicts, MountPoint, DebugFlags, &Ptfs);
     if (!NT_SUCCESS(Result))
     {
         fail(L"cannot create file system");
@@ -2486,6 +3459,10 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         BaseUrlBuf,
         Namespace,
         MountPoint);
+
+    /* the conflict policy is reported at startup (REQ-FS-026) */
+    info(L"overwrite server version: %s",
+        Ptfs->IgnoreConflicts ? L"enabled" : L"disabled");
 
     Service->UserContext = Ptfs;
     Result = STATUS_SUCCESS;
@@ -2513,6 +3490,7 @@ usage:
             "    -ns Namespace       [Atelier namespace; becomes the volume root]\n"
             "    -user Login         [Atelier login]\n"
             "    -pass Password      [Atelier password; kept in memory only]\n"
+            "    -overwrite          [replace the server version on a conflict; off by default]\n"
             "    -m DriveLetter      [X: only; mounting on a directory is not supported]\n";
 
         fail(usage, L"" PROGNAME);

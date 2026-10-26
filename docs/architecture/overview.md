@@ -150,7 +150,7 @@ have no filesystem semantics and are not used.
 
 | Filesystem operation | WinFsp callback | Atelier sequence | Notes |
 |---|---|---|---|
-| Mount / volume info | `GetVolumeInfo` | `GET /:namespace` (probe of the `-ns` namespace) | no quota API; report `TotalSize = FreeSize = 0` ("size unknown") and label `ISFS` |
+| Mount / volume info | `GetVolumeInfo` | `GET /:namespace` (probe of the `-ns` namespace) | no quota API; report a constant synthetic capacity (`TotalSize = FreeSize = 1 TiB`) and label `ISFS` |
 | Enumerate root | `ReadDirectory` | `GET /:namespace/docnames` | category directories derived from the document list; no namespace lookup |
 | Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 (REQ-FS-003); package levels are derived from the names of the listing (§3.1) |
 | Stat (path) | `GetFileInfo`, `GetSecurityByName` | none | attributes and the full-access descriptor are synthesized; no stat metadata is collected, size is 0 until content is fetched |
@@ -419,8 +419,9 @@ These must be resolved and recorded as requirements before implementation:
     probe presents them as HTTP Basic to `GET /:namespace`; a web-session scheme is not
     used in v1 (REQ-MOUNT-012).
 11. **Read-only namespaces** — configuration list (for example `%SYS`) vs rely on `403`.
-12. **Volume size/free size** — resolved: `TotalSize` and `FreeSize` are both 0 ("size
-    unknown") and are not configurable
+12. **Volume size/free size** — resolved: a constant synthetic capacity
+    (`TotalSize = FreeSize = 1 TiB`) is reported so that Windows and applications that
+    pre-check free space do not treat the volume as full; the values are not configurable
     ([`mount-lifecycle.md`](../requirements/functional/mount-lifecycle.md), REQ-MOUNT-008).
 
 ## 13. Requirements traceability

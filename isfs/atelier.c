@@ -291,6 +291,8 @@ NTSTATUS AtelierRequestEx(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Passwo
 {
     HINTERNET Connection = 0, Request = 0;
     PWSTR AuthHeader = 0;
+    LPVOID Body = WINHTTP_NO_REQUEST_DATA;
+    DWORD BodyLength = 0;
     WCHAR FullPath[2048];
     PBYTE Response = 0;
     DWORD Total = 0;
@@ -302,6 +304,12 @@ NTSTATUS AtelierRequestEx(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Passwo
 
     if (0 != Options && 0 != Options->ETag && 0 != Options->ETagCch)
         Options->ETag[0] = L'\0';
+
+    if (0 != Options && 0 != Options->Body && 0 != Options->BodyLength)
+    {
+        Body = (LPVOID)Options->Body;
+        BodyLength = Options->BodyLength;
+    }
 
     if (FAILED(StringCchPrintfW(FullPath, ARRAYSIZE(FullPath), L"%s%s", Client->BasePath, Path)))
         return STATUS_OBJECT_NAME_INVALID;
@@ -335,7 +343,7 @@ NTSTATUS AtelierRequestEx(ATELIER_CLIENT* Client, PCWSTR UserName, PCWSTR Passwo
             !WinHttpAddRequestHeaders(Request, Options->Headers, (DWORD)-1,
                 WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) ||
         !WinHttpSendRequest(Request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            Body, BodyLength, BodyLength, 0) ||
         !WinHttpReceiveResponse(Request, 0))
     {
         Result = AtelierTransportError(FullPath, GetLastError());
