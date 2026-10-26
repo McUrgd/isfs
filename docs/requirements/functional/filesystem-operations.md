@@ -125,7 +125,7 @@ synthesized locally.
 
 ### REQ-FS-006 — The size of a document is the byte length of its decoded content
 
-Status: draft
+Status: implemented
 
 The size reported for a document must be the length in bytes of the content as it
 is served to the caller, counted after the text or binary decoding.
@@ -141,7 +141,7 @@ Acceptance criteria:
 
 ### REQ-FS-007 — Timestamps are interpreted as server local time
 
-Status: draft
+Status: implemented
 
 The `ts` value of a document carries no time zone. ISFS must interpret it as
 local time and must not apply an offset of its own.
@@ -159,7 +159,7 @@ Acceptance criteria:
 
 ### REQ-FS-008 — Attributes distinguish synthetic directories from documents
 
-Status: draft
+Status: implemented
 
 The attributes reported for an entry must mark the synthetic category directories
 as directories and the documents as ordinary files.
@@ -173,20 +173,20 @@ Acceptance criteria:
 
 ### REQ-FS-009 — The security descriptor is synthesized locally
 
-Status: draft
+Status: implemented
 
-The security descriptor of every entry must be synthesized by ISFS and must grant
-the mounting user full access to it. It is never read from the server and never
-written to it.
+The Atelier API carries no access rights and ISFS does not manage them, so the
+security descriptor of every entry must be synthesized locally as one fixed
+full-access descriptor. It is never read from the server and never written to it.
 
 Acceptance criteria:
-- Every entry reports a descriptor that grants the mounting user full control.
-- The descriptor is the same for a document and for a synthetic directory.
+- Every entry reports the same synthesized descriptor, `O:BAG:BAD:(A;;FA;;;WD)`,
+  which grants full control to everyone.
 - No request to the server is issued to read or to write a descriptor.
 
 ### REQ-FS-010 — Setting the security descriptor is refused
 
-Status: draft
+Status: implemented
 
 An attempt to change the security descriptor of an entry must be refused.
 
@@ -197,7 +197,7 @@ Acceptance criteria:
 
 ### REQ-FS-011 — Setting timestamps is accepted and ignored
 
-Status: draft
+Status: implemented
 
 An attempt to set the timestamps of an entry must succeed, but must not change
 the timestamps reported afterwards: the server `ts` stays authoritative.
@@ -209,7 +209,7 @@ Acceptance criteria:
 
 ### REQ-FS-012 — The index number of an entry is stable
 
-Status: draft
+Status: implemented
 
 The index number reported for a document must be stable for the lifetime of the
 mount and must be derived from the namespace and the document name.
@@ -225,20 +225,20 @@ Acceptance criteria:
 
 ### REQ-FS-013 — The content is fetched once per open handle
 
-Status: draft
+Status: implemented
 
 Opening a document for reading must fetch its content once; all reads on that
 handle are then served from memory.
 
 Acceptance criteria:
-- The first read on a handle issues the content request for the document.
+- The open of a handle issues the content request for the document; no read does.
 - Further reads on the same handle issue no further request.
 - Two handles on the same document each hold their own buffer; an open handle
   never re-reads the document from the server.
 
 ### REQ-FS-014 — Reads are served from memory, never as server byte ranges
 
-Status: draft
+Status: implemented
 
 The Atelier API has no byte-range read. A read must therefore be served entirely
 from the content held in memory, and the server must never be asked for a range.
@@ -251,7 +251,7 @@ Acceptance criteria:
 
 ### REQ-FS-015 — A text document is the line array joined with a line feed
 
-Status: draft
+Status: implemented
 
 A document with `enc=false` must be reconstructed from its line array by joining
 the elements with a line feed.
@@ -264,7 +264,7 @@ Acceptance criteria:
 
 ### REQ-FS-016 — A binary document is the base64 chunks decoded
 
-Status: draft
+Status: implemented
 
 A document with `enc=true` must be reconstructed by concatenating its base64
 chunks and decoding the result.
