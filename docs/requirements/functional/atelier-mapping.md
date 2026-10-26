@@ -100,7 +100,7 @@ Acceptance criteria:
 
 ### REQ-MAP-003 — The first segment of a document path is its category
 
-Status: draft
+Status: implemented
 
 The first segment of the path of a document must be the category that the
 server assigns to it.
@@ -117,7 +117,7 @@ Acceptance criteria:
 
 ### REQ-MAP-004 — The dots of a document name become directory levels
 
-Status: draft
+Status: implemented
 
 The name of a document must be split into package levels and a file name
 according to the dots it contains.
@@ -135,7 +135,7 @@ Acceptance criteria:
 
 ### REQ-MAP-005 — The Atelier name of a path is reconstructed from its segments
 
-Status: draft
+Status: implemented
 
 The Atelier name of a document must be reconstructed from the segments of its
 path, and every request for a document must carry the reconstructed name.
@@ -150,7 +150,7 @@ Acceptance criteria:
 
 ### REQ-MAP-006 — A document whose name contains a dot has no flat alias
 
-Status: draft
+Status: implemented
 
 A document whose name contains a dot must be reachable only through the
 nested path that its name describes.
@@ -184,7 +184,7 @@ Acceptance criteria:
 
 ### REQ-MAP-008 — A package level is listed from the listing of its category
 
-Status: draft
+Status: implemented
 
 The contents of a package level must be served from the listing of its
 category, filtered by the package prefix.
@@ -219,7 +219,7 @@ Acceptance criteria:
 
 ### REQ-MAP-010 — Names that differ only by case: the first one is exposed
 
-Status: draft
+Status: implemented
 
 Two documents of one category whose names differ only by case must not both be
 exposed; the first one wins and the collision is logged.
@@ -239,7 +239,7 @@ Acceptance criteria:
 
 ### REQ-MAP-011 — Generated documents are not exposed
 
-Status: draft
+Status: implemented
 
 A generated document must not appear in the tree of the volume.
 
@@ -257,7 +257,7 @@ Acceptance criteria:
 
 ### REQ-MAP-012 — The segments of a name are used verbatim
 
-Status: draft
+Status: implemented
 
 The segments of a document name must be used as path segments exactly as the
 server returns them.
@@ -287,7 +287,7 @@ Acceptance criteria:
 
 ### REQ-MAP-014 — A created file is reported before the first flush
 
-Status: draft
+Status: implemented
 
 A file that was created but not yet flushed must be reported by the file
 system as an existing file with the content of its local buffer, even though
@@ -311,7 +311,7 @@ Acceptance criteria:
 
 ### REQ-MAP-015 — A path is resolved against the listing of its category
 
-Status: draft
+Status: implemented
 
 A path below the root must be resolved against the listing of the category
 that its first segment names.

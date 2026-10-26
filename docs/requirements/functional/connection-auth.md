@@ -75,7 +75,7 @@ and the client-side certificate handling it would need is out of scope.
 
 ### REQ-CONN-003 — All requests use the mount-time base URL
 
-Status: draft
+Status: implemented
 
 Every request issued by the mounted volume must target the base URL composed
 at mount time from `-p` and `-ns`; no request may address another host, port
@@ -117,7 +117,7 @@ Acceptance criteria:
 
 ### REQ-CONN-006 — Every request carries HTTP Basic credentials
 
-Status: draft
+Status: implemented
 
 Every request issued against the Atelier server must carry an HTTP Basic
 `Authorization` header built from the `-user` and `-pass` launch parameters.
@@ -163,7 +163,7 @@ Acceptance criteria:
 
 ### REQ-CONN-009 — There is no session: the credential is presented per request
 
-Status: draft
+Status: implemented
 
 ISFS must not create, keep or refresh a server-side session. The Atelier
 export exposes no login or logout route (api.md §2), so the credential is
@@ -192,7 +192,7 @@ Acceptance criteria:
 
 ### REQ-CONN-011 — The credentials are wiped when the volume is destroyed
 
-Status: draft
+Status: implemented
 
 The login and the password held in memory must be overwritten before the memory
 that holds them is released, when the volume is unmounted or the mount fails.
@@ -208,8 +208,9 @@ Acceptance criteria:
 > The login is not a secret in the same sense as the password, but leaving
 > either credential in freed memory serves no purpose.
 >
-> Current state: the password is wiped when the volume is destroyed; the login
-> is released without being overwritten.
+> Implementation: both the login and the password are overwritten with
+> `SecureZeroMemory` before they are freed, on the normal unmount path and on
+> the mount-failure path.
 
 ### REQ-CONN-012 — The login is wiped separately — dropped
 
@@ -251,7 +252,7 @@ Acceptance criteria:
 
 ### REQ-CONN-015 — A `401` during an operation fails the operation only
 
-Status: draft
+Status: implemented
 
 A `401` response to a request that is issued while the volume is mounted must
 fail that operation with `STATUS_ACCESS_DENIED`. ISFS must not attempt to
@@ -324,7 +325,7 @@ Acceptance criteria:
 
 ### REQ-CONN-021 — One HTTP client session per mount
 
-Status: draft
+Status: implemented
 
 The mounted volume must own a single HTTP client session that is created at
 mount time and used for all requests, and it must be closed when the volume is
@@ -337,7 +338,7 @@ Acceptance criteria:
 
 ### REQ-CONN-022 — The connection is kept alive between requests
 
-Status: draft
+Status: implemented
 
 The HTTP connection must be reused between requests, and a connection that was
 closed by the peer must be re-established transparently before the next
@@ -366,7 +367,7 @@ Acceptance criteria:
 
 ### REQ-CONN-024 — Transport failures map to a fixed set of NTSTATUS values
 
-Status: draft
+Status: implemented
 
 Every transport failure must be mapped to one of a fixed set of NTSTATUS
 values: `STATUS_NETWORK_UNREACHABLE` for a name that cannot be resolved, a
@@ -385,7 +386,7 @@ Acceptance criteria:
 
 ### REQ-CONN-025 — A post-mount failure keeps the volume mounted
 
-Status: draft
+Status: implemented
 
 A connection failure that occurs while the volume is mounted must fail the
 affected operation only. ISFS must not unmount the volume, must not release

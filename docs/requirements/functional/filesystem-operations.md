@@ -303,7 +303,7 @@ Acceptance criteria:
 
 ### REQ-FS-019 — A new document that is never written is stored empty
 
-Status: draft
+Status: implemented
 
 A file that was created and never written must be sent to the server as an empty
 document when the handle is closed, so that the caller observes the file it asked
@@ -317,7 +317,7 @@ Acceptance criteria:
 
 ### REQ-FS-020 — Writes are buffered and sent as one document
 
-Status: draft
+Status: implemented
 
 Writes to a document must be applied to an in-memory buffer, and the buffer must be
 sent to the server as a single replacement of the document.
@@ -331,7 +331,7 @@ Acceptance criteria:
 
 ### REQ-FS-021 — The write is a JSON document body
 
-Status: draft
+Status: implemented
 
 The request that saves a document must carry the document content as a JSON body
 in the shape of the document object.
@@ -350,7 +350,7 @@ Acceptance criteria:
 
 ### REQ-FS-022 — Line ends written by Windows are normalized
 
-Status: draft
+Status: implemented
 
 Text written by Windows applications must be normalized to the line feed model of
 the Atelier line array.
@@ -362,7 +362,7 @@ Acceptance criteria:
 
 ### REQ-FS-023 — The encoding of a write is chosen from the content
 
-Status: draft
+Status: implemented
 
 The decision whether a document is written as text or as binary must be taken from
 the content of the buffer.
@@ -380,7 +380,7 @@ Acceptance criteria:
 
 ### REQ-FS-024 — A document cannot be extended beyond its content
 
-Status: draft
+Status: implemented
 
 The API replaces a document as a whole. A request that would grow a document
 beyond its current content must therefore be refused.
@@ -393,7 +393,7 @@ Acceptance criteria:
 
 ### REQ-FS-025 — The save is conditional on the hash of the opened document
 
-Status: draft
+Status: implemented
 
 A document must be saved under the condition that the server still holds the
 version that was read when the handle was opened.
@@ -408,7 +408,7 @@ Acceptance criteria:
 
 ### REQ-FS-026 — The server version is overwritten only on explicit request
 
-Status: draft
+Status: implemented
 
 The check of the previous requirement may be bypassed only when the user has
 explicitly asked for it.
@@ -425,7 +425,7 @@ Acceptance criteria:
 
 ### REQ-FS-027 — The cache is updated from the answer of the server
 
-Status: draft
+Status: implemented
 
 The answer of a successful save must become the current content of the document,
 because the server may return content that differs from what was sent.
@@ -439,7 +439,7 @@ Acceptance criteria:
 
 ### REQ-FS-028 — A flush sends nothing when nothing was written
 
-Status: draft
+Status: implemented
 
 A flush must send a request to the server only when the buffer of the handle
 differs from the content that was read.
@@ -451,7 +451,7 @@ Acceptance criteria:
 
 ### REQ-FS-029 — A failed save is retried once at close and then dropped
 
-Status: draft
+Status: implemented
 
 When a save fails, the buffer of the handle stays dirty, the close of the handle
 sends one last attempt, and data that is still not acknowledged at that point is
@@ -574,7 +574,7 @@ Acceptance criteria:
 
 ### REQ-FS-038 — Sharing and lock modes are enforced locally
 
-Status: draft
+Status: implemented
 
 The sharing and lock modes of Windows are enforced by the local file system
 host. The API has no lock, so no call is issued to the server for a lock or for a

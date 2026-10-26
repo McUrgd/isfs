@@ -215,7 +215,7 @@ the server's ACL model, could contradict it, and would give a false sense of pro
 
 ### REQ-MOUNT-021 — Actionable mount failure diagnostics
 
-Status: draft
+Status: implemented
 
 Every mount failure must produce an actionable message that identifies the endpoint and the
 cause (authentication, DNS, TLS, timeout, invalid namespace) in the service log or mount
