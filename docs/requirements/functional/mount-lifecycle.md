@@ -252,16 +252,22 @@ Acceptance criteria:
 - Discarding pending data does not fail the unmount (REQ-MOUNT-022) and leaves no trace in
   the log: the loss is fully silent.
 
-### REQ-MOUNT-024 — Acknowledged writes survive unmount
+> `GET` after the unmount returns whatever the server holds, because ISFS keeps no local
+> copy of a document once the handle is gone. The mount neither sends nor reverts anything
+> at unmount; the durability of a version the server already accepted is outside its
+> control (REQ-MOUNT-024).
 
-Status: draft
+### REQ-MOUNT-024 — Acknowledged writes survive unmount — dropped
 
-Writes already acknowledged by a successful flush must be present on the server before the
-unmount completes.
+Status: dropped
 
-Acceptance criteria:
-- Write, flush, unmount, then `GET` the document: the content matches the written content.
-- No acknowledged write depends on the ISFS process staying alive.
+A promise that an acknowledged write is present on the server after the unmount is
+intentionally unsupported: ISFS does not control the behaviour of the remote server.
+Rationale: a successful flush only records that the server accepted the `PUT` and answered
+`2xx` (REQ-FS-027); ISFS keeps no local copy of the content, so a rollback, a restore, a
+journal replay or a server-side change may replace or discard the accepted version
+afterwards, and no client-side promise can prevent that. Unmount itself neither sends nor
+reverts anything (REQ-MOUNT-023).
 
 ### REQ-MOUNT-027 — Offline mount — dropped
 

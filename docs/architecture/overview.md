@@ -357,8 +357,9 @@ entries.
   close the remaining buffer goes out in one final `PUT`, and whatever is still not
   acknowledged at that point is discarded without an error. Unmount never flushes: pending
   changes are dropped silently, with no `PUT` and no error reported for the discarded data
-  (REQ-MOUNT-023). Only content acknowledged by a successful flush is guaranteed to be on the
-  server (REQ-MOUNT-024).
+  (REQ-MOUNT-023). A successful flush means only that the server accepted the content: ISFS
+  keeps no local copy of it and makes no promise about the durability of the accepted
+  version, which the server may replace or discard afterwards (REQ-MOUNT-024).
 - Long-running requests are bounded by connect/read timeouts; mounts fail fast if the
   server is unreachable.
 
