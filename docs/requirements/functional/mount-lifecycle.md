@@ -239,7 +239,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-023 — Unmount discards unsaved data
 
-Status: draft
+Status: implemented
 
 Unmounting must not persist unsaved changes. Data buffered in open handles that has not been
 acknowledged by a successful flush is discarded, and unmount must not attempt to flush it

@@ -87,6 +87,7 @@ typedef struct
     PWSTR Namespace; /* the -ns value, used for the index numbers (REQ-FS-012) */
     ATELIER_CLIENT Client; /* the HTTP client of the mount */
     BOOLEAN IgnoreConflicts; /* -overwrite: ignoreConflict=1 on every save (REQ-FS-026) */
+    volatile LONG Stopping; /* the volume is being unmounted: buffers are dropped (REQ-MOUNT-023) */
     PTFS_CATEGORY_CACHE Cache[CATEGORY_COUNT]; /* the descriptor caches */
 } PTFS;
 
@@ -1253,6 +1254,13 @@ static NTSTATUS SaveDocument(PTFS* Ptfs, PTFS_FILE_CONTEXT* Context,
     BOOLEAN NewEnc = FALSE, HasContent = FALSE;
     UINT64 NewTimestamp = 0;
     NTSTATUS Result;
+
+    /* the volume is being unmounted: the buffer of the handle is discarded
+     * without a request and without a log line, so the loss is silent; the
+     * server keeps the last version it acknowledged (REQ-MOUNT-023)
+     */
+    if (0 != Ptfs->Stopping)
+        return 0 != FileInfo ? GetDocumentInfo(Ptfs, Context, FileInfo) : STATUS_SUCCESS;
 
     /* nothing was written into the buffer: the save sends nothing
      * (REQ-FS-028); a created file that was never written is stored empty
@@ -3505,6 +3513,14 @@ usage:
 static NTSTATUS SvcStop(FSP_SERVICE* Service)
 {
     PTFS* Ptfs = Service->UserContext;
+
+    /* REQ-MOUNT-023: from here on a flush or a close of a document drops its
+     * buffer instead of sending it. The flag is raised before the dispatcher
+     * stops, so no request that starts after it reaches the server; a request
+     * that was already running is not interrupted and still reports its own
+     * flush as it would without an unmount.
+     */
+    InterlockedExchange(&Ptfs->Stopping, TRUE);
 
     FspFileSystemStopDispatcher(Ptfs->FileSystem);
     PtfsDelete(Ptfs);

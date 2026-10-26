@@ -460,6 +460,8 @@ discarded without an error.
 Acceptance criteria:
 - After a failed `PUT` the buffer is still dirty.
 - The close of the handle issues one final `PUT` with the buffer content.
+- A close during unmount is the exception: it issues no `PUT` and drops the buffer, because
+  the unmount discards unsaved data (REQ-MOUNT-023).
 - Data that is not acknowledged by that final attempt is discarded; the close
   succeeds and reports no error for the discarded data.
 - The discard is silent: nothing is written to the log about it (REQ-MOUNT-023).

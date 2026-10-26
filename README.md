@@ -60,6 +60,25 @@ A save is conditional on the hash of the document that was opened. The
 The request log goes to `%TEMP%\isfs-mock-atelier.log` by default; use `-LogFile` to change it.
 The namespace and the exposed documents are defined at the top of the script.
 
+=== Manual check: unmount discards unsaved data ===
+
+`scripts\unmount-test.ps1` is a reproducible manual check of REQ-MOUNT-023. It starts the mock
+on a free loopback port, mounts `isfs\isfs.exe` on a free drive letter, writes into
+`User.Person.cls` and keeps the handle open, so the volume holds a dirty buffer. The mount is
+then stopped the way Ctrl+C stops it (a graceful `SvcStop`, not a killed process), and the
+script verifies that the write reached the file system, the server received no `PUT` or
+`DELETE`, the document content is unchanged, the drive letter was released and the service log
+has no `saved the document` line:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\unmount-test.ps1
+```
+
+Rebuild `isfs\isfs.exe` first: the check reports what that binary does. `-Drive` and `-Port`
+override the free drive letter and the port; the work directory (`%TEMP%\isfs-unmount-test` by
+default) keeps the request log of the mock, the service log and the debug log of isfs. The
+script exits with 0 only when every check passed.
+
 === Third-party ===
 
 - `cjson/` - [cJSON](https://github.com/DaveGamble/cJSON) v1.7.19, MIT license
