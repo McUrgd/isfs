@@ -81,7 +81,14 @@ extension rules of [`api.md`](api.md) §4 (`CLS` for `.cls`, `RTN` for `.mac`/`.
 
 The Atelier name of a document is the **short Atelier document name including its
 extension** (`User.Person.cls`, `MyApp.mac`, `index.csp`). The name is split into a
-directory path and a file name:
+directory path and a file name, and the separator of that split depends on the category:
+
+- `CLS`, `RTN` and `OTH` split the name by dots;
+- `CSP` splits the name by slashes, because the server spells a CSP document as an
+  application path, e.g. `/csp/user/index.csp` (REQ-MAP-020), while the API addresses the
+  same document without the leading slash.
+
+**`CLS`, `RTN`, `OTH` — the dots of the name:**
 
 1. The **extension** is the part after the last dot of the name; it stays with the file.
 2. Every **earlier dot** of the name becomes a directory separator. The segments in front
@@ -93,20 +100,40 @@ directory path and a file name:
 User.Person.cls     →  CLS\User\Person.cls
 MyApp.mac           →  RTN\MyApp.mac
 %Activate.Enum.cls  →  CLS\%Activate\Enum.cls
-index.csp           →  CSP\index.csp
 notes.backup.txt    →  OTH\notes\backup.txt
 ```
 
-The mapping is lossless in both directions: a path is turned back into an Atelier name by
-joining all of its segments with dots, the extension staying with the last segment
-(`CLS\User\Person.cls` → `User.Person.cls`). Therefore:
+**`CSP` — the slashes of the application path:**
 
-- the Atelier name in every URL is always the dotted name, never the path;
-- a document whose name contains a dot is reachable **only** through the nested path —
+1. The **leading slash** is not part of the path: `/csp/user/index.csp` and
+   `csp/user/index.csp` are the same document, and every request for it uses the form
+   without the slash.
+2. Every slash becomes a directory level and the last segment is the file, so the whole
+   application hierarchy is replicated below the category, the first level being the
+   application root (`csp`).
+3. Dots are not separators here: they stay inside a segment, so `index.csp` keeps its
+   extension as part of the file name.
+4. A name without a slash stays a single segment at the root of `CSP`.
+
+```
+/csp/user/index.csp    →  CSP\csp\user\index.csp
+/csp/gkh/Utils/CreateContracts.csp
+                       →  CSP\csp\gkh\Utils\CreateContracts.csp
+index.csp              →  CSP\index.csp
+```
+
+The mapping is lossless in both directions: a path is turned back into an Atelier name by
+joining all of its segments with the separator of its category — dots for `CLS`, `RTN` and
+`OTH`, slashes for `CSP` — the extension staying with the last segment
+(`CLS\User\Person.cls` → `User.Person.cls`, `CSP\csp\user\index.csp` →
+`csp/user/index.csp`). Therefore:
+
+- the Atelier name in every URL is always the composed name, never the path;
+- a document whose name contains a separator is reachable **only** through the nested path —
   there is no flat alias, because `CLS\User.Person.cls` would be indistinguishable from the
   package directory `User` followed by the file `Person.cls`;
-- the package levels are not a server-side resource: they are derived from the dotted names
-  of a category listing and exist only as long as a document below them exists.
+- the package levels are not a server-side resource: they are derived from the names of a
+  category listing and exist only as long as a document below them exists.
 
 ```
 I:\
@@ -117,7 +144,10 @@ I:\
 ├── RTN\
 │   └── MyApp.mac
 ├── CSP\
-│   └── index.csp
+│   ├── index.csp
+│   └── csp\
+│       └── user\
+│           └── index.csp
 └── OTH\
     └── settings.json
 ```
@@ -175,7 +205,7 @@ have no filesystem semantics and are not used.
 Atelier v1 has no rename or copy endpoint. Rename is composed:
 
 1. `GET` the source document (content, `ts`, hash).
-2. `PUT` the target name — the dotted Atelier name reconstructed from the target path
+2. `PUT` the target name — the Atelier name reconstructed from the target path
    (§3.1), possibly in another category or another package — preserving `enc` and
    content.
 3. `DELETE` the source document.
@@ -189,7 +219,7 @@ Consequences:
   overwritten by step 2. If the caller does not allow replacement, the request is rejected
   with `STATUS_OBJECT_NAME_COLLISION` before any API call.
 - Moving between categories or between package levels changes the Atelier document name:
-  the `PUT` URL carries the dotted name of the target path, and the source document is
+  the `PUT` URL carries the name of the target path, and the source document is
   deleted under its old name. Moving between namespaces is impossible: the namespace is
   fixed for the mount by `-ns`, so a cross-volume move is a copy between two mounts.
 - Directory rename is impossible because directories are synthetic — this holds for the
@@ -276,7 +306,7 @@ of an open handle.
 | `LastAccessTime` | document `ts` |
 | `LastWriteTime` | document `ts` |
 | `ChangeTime` | document `ts` |
-| `IndexNumber` | stable hash (FNV-1a 64) of `namespace + "\0" + name`, where the name is the dotted Atelier name of a document or the dotted path of a package level (§3.1) |
+| `IndexNumber` | stable hash (FNV-1a 64) of `namespace + "\0" + name`, where the name is the Atelier name of a document or the separator-joined path of a package level (§3.1) |
 | `HardLinks` | 0 |
 | `ReparseTag` | 0 |
 
@@ -419,6 +449,10 @@ tracked.
    `\<CAT>\User\Person.cls`. The layout is lossless in both directions, because the
    extension is the part after the last dot and the name is reconstructed by joining the
    path segments with dots; no escaping scheme is needed (REQ-MAP-004, REQ-MAP-005).
+   The one exception is `CSP`: the server spells those documents as application paths,
+   so the slashes are the levels and the leading slash is dropped, which exposes
+   `/csp/gkh/Utils/CreateContracts.csp` as `CSP\csp\gkh\Utils\CreateContracts.csp`
+   (REQ-MAP-020).
 3. **Size strategy** — resolved: lazy. Listings and stat report 0, an open handle reports the
    exact size once the content is fetched (REQ-FS-003, REQ-FS-006); batch prefetch is
    deferred together with the content cache.

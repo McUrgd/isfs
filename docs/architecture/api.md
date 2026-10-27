@@ -31,8 +31,9 @@ https://<host>:<web-port>/api/atelier/v1
 
 - `%` in path segments is percent-encoded: namespace `%SYS` becomes `%25SYS`.
 - Document names are passed in the path after `/doc/`; the route is `(.*)`, so it
-  captures everything to the end of the URL. Document names are not expected to contain
-  `/`; such names should be rejected as invalid.
+  captures everything to the end of the URL. A CSP document is an application path and
+  therefore contains `/` (e.g. `csp/user/index.csp`); other names do not, and a name with
+  an empty segment (`//`) is invalid.
 - Requests and responses are UTF-8 JSON unless stated otherwise.
 - Authentication and session handling are provided by the web gateway and the
   `%Atelier.REST` superclass. This export contains no login/logout route: use the
@@ -74,13 +75,15 @@ returns the array directly in `result` (see §8.3.6).
 ## 4. Document names, extensions and categories
 
 A document is identified by its full name including extension, for example
-`User.Person.cls`, `MyApp.mac`, `index.csp`. The server normalises and validates names;
-invalid names produce `400`.
+`User.Person.cls`, `MyApp.mac`, `index.csp`. The exception is `CSP`: there the name is an
+application path with slashes, e.g. `/csp/user/index.csp`. The server normalises and
+validates names; invalid names produce `400`.
 
 The name is a single string; the API has no notion of directories or packages. ISFS turns
-the dots of a name into directory levels when it exposes a document as a file
-([`overview.md`](overview.md) §3.1), so every URL below carries the dotted name
-(`/doc/User.Person.cls`), never a path.
+the dots of a name — or the slashes of a CSP application path — into directory levels when
+it exposes a document as a file ([`overview.md`](overview.md) §3.1), so every URL below
+carries the composed name (`/doc/User.Person.cls`, `/doc/csp/user/index.csp`), never a path
+of the volume. A CSP document is listed with a leading slash but is addressed without it.
 
 Categories are derived from the extension/type. The mapping used by the implementation
 (`getTypeCat`/`getDlgCat`) is:
@@ -96,6 +99,8 @@ Additional notes:
 
 - Namespace names are case-insensitive; `GetNamespace` uppercases them.
 - Document names are used as-is by the API; the server may return a normalised name.
+- The name of a listed CSP document is its application path with a leading slash
+  (`/csp/user/index.csp`); the same document is addressed without that slash.
 - Generated documents are excluded by default. Pass `generated=1` to include them.
 - CSP documents can be filtered by CSP application with the `app` query parameter; if the
   application does not belong to the namespace, `GetDocNames` returns `404`.

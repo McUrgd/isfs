@@ -48,7 +48,7 @@ _The namespace root and a package directory: the documents of the server as ordi
 
 | Operation | Behaviour |
 |---|---|
-| Directory listing | root → categories (`CLS`, `CSP`, `RTN`, `OTH`) → package levels, derived from the dotted document names |
+| Directory listing | root → categories (`CLS`, `CSP`, `RTN`, `OTH`) → package levels, derived from the document names (dots; the slashes of a CSP application path) |
 | Read | the whole document is fetched on open: text lines, or base64 chunks for a binary document |
 | Write / save | buffered per handle, `PUT` on flush/cleanup, conditional on the hash taken at open |
 | Create | an untouched new file is written as an empty document on cleanup |
@@ -205,7 +205,8 @@ The v1 scope is deliberate; each item below is recorded in
 ## How it works
 
 WinFsp callbacks are translated into a path model, and the path model into Atelier REST
-calls: `\<CAT>\<PKG>\…\<NAME>` is decomposed back into the dotted document name, text is
+calls: `\<CAT>\<PKG>\…\<NAME>` is composed back into the Atelier name — by dots for `CLS`,
+`RTN` and `OTH`, by slashes for the application path of a `CSP` document — text is
 kept as a line array and binary content as base64, and the whole document is replaced on
 save.
 
@@ -225,7 +226,7 @@ Each script exits with 0 only when every check passed.
 Rebuild `isfs\isfs.exe` first: the checks report what that binary does. `-Drive` and `-Port`
 override the free drive letter and the port.
 
-The same three checks run in CI on `windows-2022` after a default and a `/W4 /WX` build; see
+The same four checks run in CI on `windows-2022` after a default and a `/W4 /WX` build; see
 [the CI workflow](.github/workflows/build.yml). It installs WinFsp with Chocolatey, mounts a
 drive letter, and uploads the mock, service and debug logs of every run as an artifact.
 
@@ -236,11 +237,15 @@ server is needed:
 
 - `GET /api/atelier/v1/<namespace>` — namespace information;
 - `GET /api/atelier/v1/<namespace>/docnames/<category>` — document listing;
-- `GET /api/atelier/v1/<namespace>/doc/<dotted-name>` — document content
+- `GET /api/atelier/v1/<namespace>/doc/<name>` — document content
   (text with `enc=false`, binary base64 with `enc=true`);
-- `PUT /api/atelier/v1/<namespace>/doc/<dotted-name>` — create or replace a document, with
+- `PUT /api/atelier/v1/<namespace>/doc/<name>` — create or replace a document, with
   the `If-None-Match` conflict check;
-- `DELETE /api/atelier/v1/<namespace>/doc/<dotted-name>` — delete a document.
+- `DELETE /api/atelier/v1/<namespace>/doc/<name>` — delete a document.
+
+`<name>` is the Atelier name of the document: a dotted name such as `User.Person.cls`, or an
+application path such as `csp/gkh/Utils/CreateContracts.csp` for a CSP document. The mock
+lists a CSP document with the leading slash the real server uses and accepts both forms.
 
 Start it:
 
@@ -303,6 +308,22 @@ powershell -ExecutionPolicy Bypass -File scripts\delete-test.ps1
 ```
 
 The work directory (`%TEMP%\isfs-delete-test` by default) keeps the logs.
+
+### Manual check: the CSP application tree
+
+`scripts\csp-test.ps1` covers REQ-MAP-020 next to REQ-MAP-004 and REQ-MAP-005. It reads the
+`CSP` listing, opens a document of an application path
+(`CSP\csp\gkh\Utils\CreateContracts.csp`), creates, renames and deletes a CSP document, and
+verifies the names in the requests: the `PUT` and `DELETE` carry `csp/gkh/Utils/…` with no
+leading slash and no empty segment. It also checks that no CSP document is reported as
+"not a legal file name", which is what the flat slash name produced before the hierarchy
+was mapped:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\csp-test.ps1
+```
+
+The work directory (`%TEMP%\isfs-csp-test` by default) keeps the logs.
 
 ## Releasing
 

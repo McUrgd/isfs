@@ -35,17 +35,20 @@ directories — the categories and the package levels — and the documents.
 | `\` | directory (volume root) | the namespace of the mount |
 | `\<CAT>\` | directory (synthetic) | — |
 | `\<CAT>\<PKG>\` | directory (synthetic) | — |
-| `\<CAT>\<PKG>\…\<NAME>` | file | `<PKG>.<…>.<NAME>` |
+| `\<CAT>\<PKG>\…\<NAME>` | file | `<PKG>.<…>.<NAME>` for `CLS`/`RTN`/`OTH`, `<PKG>/<…>/<NAME>` for `CSP` |
 
 `<CAT>` is one of `CLS`, `CSP`, `RTN`, `OTH`. A document name is split into
-its package levels and its file name by the rule of REQ-MAP-004; the file name
-keeps the extension.
+its package levels and its file name by the rule of REQ-MAP-004: by dots for
+`CLS`, `RTN` and `OTH`, and by the slashes of the application path for `CSP`
+(REQ-MAP-020). The file name keeps the extension.
 
 ```
 User.Person.cls     →  CLS\User\Person.cls
 MyApp.mac           →  RTN\MyApp.mac
 %Activate.Enum.cls  →  CLS\%Activate\Enum.cls
 index.csp           →  CSP\index.csp
+/csp/gkh/Utils/CreateContracts.csp
+                    →  CSP\csp\gkh\Utils\CreateContracts.csp
 notes.backup.txt    →  OTH\notes\backup.txt
 ```
 
@@ -58,7 +61,11 @@ I:\
 ├── RTN\
 │   └── MyApp.mac
 ├── CSP\
-│   └── index.csp
+│   ├── index.csp
+│   └── csp\
+│       └── gkh\
+│           └── Utils\
+│               └── CreateContracts.csp
 └── OTH\
     └── settings.json
 ```
@@ -115,44 +122,55 @@ Acceptance criteria:
 - A path whose first segment is not the category of the document does not
   resolve; the lookup fails with `STATUS_OBJECT_NAME_NOT_FOUND`.
 
-### REQ-MAP-004 — The dots of a document name become directory levels
+### REQ-MAP-004 — The separator of a document name becomes a directory level
 
 Status: implemented
 
-The name of a document must be split into package levels and a file name
-according to the dots it contains.
+The name of a document must be split into directory levels and a file name according to the
+separator of its category: the dots of the name for `CLS`, `RTN` and `OTH`, the slashes of
+the application path for `CSP` (REQ-MAP-020).
 
 Acceptance criteria:
-- The extension is the part of the name after its last dot; it stays with the
-  file.
-- Every dot before that one becomes a directory separator; the segments in
+- For `CLS`, `RTN` and `OTH`: the extension is the part of the name after its last dot and
+  stays with the file; every earlier dot becomes a directory separator, so the segments in
   front of the file name are the package levels of the document.
-- A name without a dot has no extension and stays a single segment.
-- A name that begins with a dot is not decomposed; the whole name is one
+- For `CLS`, `RTN` and `OTH`: a name without a dot has no extension and stays a single
+  segment, and a name that begins with a dot is not decomposed; the whole name is one
   segment.
-- The name is never changed in any other way: no case is folded, no character
-  is substituted.
+- For `CSP`: every slash of the name becomes a directory level and the last segment is the
+  file; a leading slash does not create a level, and dots stay inside a segment, so
+  `index.csp` keeps its extension as part of the file name.
+- For `CSP`: a name without a slash stays a single segment at the root of the category.
+- The name is never changed in any other way: no case is folded, no character is
+  substituted.
 
 ### REQ-MAP-005 — The Atelier name of a path is reconstructed from its segments
 
 Status: implemented
 
-The Atelier name of a document must be reconstructed from the segments of its
-path, and every request for a document must carry the reconstructed name.
+The Atelier name of a document must be reconstructed from the segments of its path, and
+every request for a document must carry the reconstructed name.
 
 Acceptance criteria:
-- The segments of a path are joined with dots, the extension staying with the
-  last segment: `CLS\User\Person.cls` → `User.Person.cls`.
+- The segments of a path are joined with the separator of the category of the path — dots
+  for `CLS`, `RTN` and `OTH`, slashes for `CSP` — the extension staying with the last
+  segment: `CLS\User\Person.cls` → `User.Person.cls` and
+  `CSP\csp\gkh\Utils\CreateContracts.csp` → `csp/gkh/Utils/CreateContracts.csp`.
 - The URL of a request for that document is
-  `/:namespace/doc/User.Person.cls`, never the path.
-- The reconstruction is the inverse of the decomposition of REQ-MAP-004: a
-  name that was decomposed is restored exactly, including its case.
+  `/:namespace/doc/User.Person.cls` or `/:namespace/doc/csp/gkh/Utils/CreateContracts.csp`,
+  never the path.
+- A CSP name is composed without a leading slash and without an empty segment, because the
+  server lists the document as `/csp/gkh/Utils/CreateContracts.csp` but addresses it as
+  `csp/gkh/Utils/CreateContracts.csp`; the leading slash is removed from a listed name once,
+  when the listing is parsed.
+- The reconstruction is the inverse of the decomposition of REQ-MAP-004: a name that was
+  decomposed is restored exactly, including its case.
 
-### REQ-MAP-006 — A document whose name contains a dot has no flat alias
+### REQ-MAP-006 — A document whose name contains a separator has no flat alias
 
 Status: implemented
 
-A document whose name contains a dot must be reachable only through the
+A document whose name contains a dot or a slash must be reachable only through the
 nested path that its name describes.
 
 Acceptance criteria:
@@ -160,6 +178,8 @@ Acceptance criteria:
   and resolves to nothing.
 - The document is reachable at `CLS\User\Person.cls`.
 - The lookup of the flat form fails with `STATUS_OBJECT_NAME_NOT_FOUND`.
+- A CSP document has no flat form either: `/csp/gkh/Utils/CreateContracts.csp` is
+  reachable at `CSP\csp\gkh\Utils\CreateContracts.csp` and nowhere else (REQ-MAP-020).
 
 > Rationale: the flat form would be indistinguishable from the package
 > directory `User` followed by the file `Person.cls`. The mapping stays
@@ -210,7 +230,7 @@ Acceptance criteria:
 - `\cls\user\person.cls` resolves to `\CLS\User\Person.cls`.
 - A listing reports the casing of the server, not the casing of the request
   (REQ-FS-004).
-- The comparison is performed on the segments of the path, not on the dotted
+- The comparison is performed on the segments of the path, not on the composed
   name: `cls\user\person.cls` and `CLS\USER\PERSON.CLS` resolve to the same
   document.
 
@@ -341,9 +361,10 @@ A rename that changes the package level of a document must change the Atelier
 name of that document.
 
 Acceptance criteria:
-- The `PUT` of the rename carries the dotted name reconstructed from the
+- The `PUT` of the rename carries the Atelier name reconstructed from the
   target path (REQ-MAP-005), e.g. `Admin.Person.cls` for the target
-  `CLS\Admin\Person.cls`.
+  `CLS\Admin\Person.cls` or `csp/gkh/Utils/Page.csp` for the target
+  `CSP\csp\gkh\Utils\Page.csp` (REQ-MAP-020).
 - The source document is deleted under its old name.
 - A rename that keeps the category and the package level keeps the name and
   only replaces the content of the document.
@@ -381,17 +402,36 @@ is intentionally unsupported. Rationale: the flat form cannot be told apart
 from a package directory followed by a file, so the mapping would stop being
 unambiguous (REQ-MAP-006).
 
-### REQ-MAP-020 — The CSP application hierarchy — dropped
+### REQ-MAP-020 — The CSP application hierarchy is a directory tree
 
-Status: dropped
+Status: implemented
 
-Exposing the CSP application hierarchy as directories of the `CSP` category is
-intentionally unsupported in v1. Rationale: a document name carries no path
-(the API expects no `/` in a name, api.md §2), so the hierarchy is not part of
-the data that ISFS receives; the `app` parameter of the listing is a
-server-side filter and is not used by the file system (api.md §8.2.1). The CSP
-documents of the namespace are exposed under `CSP\`, decomposed by the rule of
-REQ-MAP-004 like every other document.
+The application path in the name of a CSP document must be exposed as the directory tree of
+the `CSP` category.
+
+Acceptance criteria:
+- The server lists a CSP document as an application path with a leading slash, e.g.
+  `/csp/gkh/Utils/CreateContracts.csp`; it is reachable at
+  `CSP\csp\gkh\Utils\CreateContracts.csp`, and its content, timestamp and case are served as
+  they are.
+- The levels of the application path are synthetic directories of `CSP` and follow the
+  rules of any other package level: they cannot be created, deleted or renamed, and they
+  exist only as long as a document below them exists (REQ-MAP-007, REQ-FS-036,
+  REQ-FS-037).
+- A CSP document created at `CSP\csp\gkh\Utils\NewPage.csp` is written as
+  `PUT /:namespace/doc/csp/gkh/Utils/NewPage.csp`: the leading slash is not part of the
+  name and no empty segment is produced (REQ-MAP-005).
+- A CSP document whose name has no slash, e.g. `index.csp`, stays at the root of `CSP`.
+- A rename or a delete of a CSP document uses the composed name of its path, both for the
+  new name and for the old one (REQ-FS-032, REQ-FS-030).
+
+> Rationale: a CSP document is addressed by an application path, not by a dotted short name;
+> the extension rules of api.md §4 still decide the category. The `app` parameter of the
+> listing is a server-side filter and is not used by the file system (api.md §8.2.1).
+>
+> Manual check: `scripts/csp-test.ps1` mounts the mock Atelier server and verifies the tree,
+> the content, and the names of the `PUT` and `DELETE` requests of a create, a rename and a
+> delete.
 
 ### REQ-MAP-021 — System classes can be hidden
 
@@ -429,7 +469,8 @@ Acceptance criteria:
 Decided in overview §12 and folded into the requirements above:
 
 - path layout — resolved: the package levels are directories, the dots of the
-  name are the levels (REQ-MAP-004, REQ-MAP-005).
+  name are the levels, and the application path of a CSP document is a level
+  tree of its own (REQ-MAP-004, REQ-MAP-005, REQ-MAP-020).
 - case collisions — resolved: the first name is exposed, the second is skipped
   with a warning (REQ-MAP-010).
 - generated documents — resolved: they are not exposed (REQ-MAP-011).
