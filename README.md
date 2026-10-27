@@ -33,6 +33,7 @@ notices are in `NOTICE`.
 - [Known limitations](#known-limitations)
 - [How it works](#how-it-works)
 - [Testing](#testing)
+- [Releasing](#releasing)
 - [Third-party](#third-party)
 - [License](#license)
 
@@ -300,6 +301,31 @@ powershell -ExecutionPolicy Bypass -File scripts\delete-test.ps1
 ```
 
 The work directory (`%TEMP%\isfs-delete-test` by default) keeps the logs.
+
+## Releasing
+
+`scripts\release.ps1` runs the release procedure in one command: it checks that `main` is
+clean and matches `origin/main`, bumps the `proof of concept (vX.Y)` marker of this README
+when it points at an older minor version and commits that, creates an annotated tag, pushes
+the branch and the tag, and publishes the GitHub release.
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1 0.2.0
+```
+
+| Option | Effect |
+|---|---|
+| `-DryRun` | print the plan, change nothing |
+| `-NoPush` | stop after the tag is created locally |
+| `-NoRelease` | push the branch and the tag, but no GitHub release |
+| `-NotesFile notes.md` | use the file as the release notes instead of the notes GitHub generates from the commits since the previous tag |
+| `-Prerelease` | mark the release as a pre-release |
+
+The release is created through the GitHub API with `GITHUB_TOKEN` when it is set, otherwise
+with the credential git already uses for `origin`. The token is never printed and never
+written to disk. The script refuses to run from another branch, on a dirty tree, when
+`main` differs from `origin/main`, and when the tag already exists, so a failed attempt
+leaves nothing half-published except, in the worst case, a local tag.
 
 ## Third-party
 
