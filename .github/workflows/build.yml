@@ -78,7 +78,8 @@ jobs:
           $tests = @(
               @{ Name = 'unmount'; Script = 'unmount-test.ps1' },
               @{ Name = 'rename';  Script = 'rename-test.ps1'  },
-              @{ Name = 'delete';  Script = 'delete-test.ps1'  }
+              @{ Name = 'delete';  Script = 'delete-test.ps1'  },
+              @{ Name = 'csp';     Script = 'csp-test.ps1'     }
           )
           $failed = @()
           foreach ($test in $tests) {

@@ -103,6 +103,32 @@ $documents = @(
         )
     }
     [pscustomobject]@{
+        Name      = '/csp/gkh/index.csp'
+        Cat       = 'CSP'
+        Ts        = '2016-04-08 09:10:11.000'
+        Enc       = $false
+        Generated = $false
+        Content   = @(
+            '<html>',
+            '<body>gkh</body>',
+            '</html>',
+            ''
+        )
+    }
+    [pscustomobject]@{
+        Name      = '/csp/gkh/Utils/CreateContracts.csp'
+        Cat       = 'CSP'
+        Ts        = '2016-04-09 10:11:12.125'
+        Enc       = $false
+        Generated = $false
+        Content   = @(
+            '<html>',
+            '<body>CreateContracts</body>',
+            '</html>',
+            ''
+        )
+    }
+    [pscustomobject]@{
         Name      = '%Activate.Enum.cls'
         Cat       = 'CLS'
         Ts        = '2016-05-08 12:14:15.125'
@@ -390,8 +416,10 @@ try
                 elseif ($path -match '/doc/(.+)$')
                 {
                     $docName = [System.Uri]::UnescapeDataString($Matches[1])
+                    # a CSP document is listed as "/csp/user/index.csp" but is
+                    # addressed as "csp/user/index.csp": the mock accepts both
                     $document = $documents |
-                        Where-Object { $_.Name -eq $docName } |
+                        Where-Object { $_.Name.TrimStart('/') -eq $docName.TrimStart('/') } |
                         Select-Object -First 1
 
                     if ('GET' -eq $method -or 'HEAD' -eq $method)
@@ -449,9 +477,21 @@ try
 
                                 if ($null -eq $document)
                                 {
+                                    $newCategory = Get-CategoryForName $docName
+                                    $storedName = $docName
+
+                                    # the server lists a CSP document with its
+                                    # application path, so a created one is
+                                    # stored that way too
+                                    if ('CSP' -eq $newCategory -and
+                                        -not $docName.StartsWith('/'))
+                                    {
+                                        $storedName = '/' + $docName
+                                    }
+
                                     $document = [pscustomobject]@{
-                                        Name      = $docName
-                                        Cat       = Get-CategoryForName $docName
+                                        Name      = $storedName
+                                        Cat       = $newCategory
                                         Ts        = New-Timestamp
                                         Enc       = $newEnc
                                         Generated = $false
@@ -482,7 +522,10 @@ try
                         }
                         else
                         {
-                            $documents = @($documents | Where-Object { $_.Name -ne $docName })
+                            # as with GET and PUT, the leading slash of a CSP
+                            # document does not take part in the comparison
+                            $documents = @($documents | Where-Object {
+                                $_.Name.TrimStart('/') -ne $docName.TrimStart('/') })
                             $body = New-DocumentJson $document
                         }
                     }
