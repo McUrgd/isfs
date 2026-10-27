@@ -42,11 +42,25 @@ ULONG SplitByDelimiter(PCWSTR Text, WCHAR Delimiter1, WCHAR Delimiter2, PWSTR** 
 /* frees the segments of a split, including the buffer they share */
 VOID FreeSegments(PWSTR* Segments, ULONG Count);
 
-/* splits a document name into its package levels and its file name: the
- * extension stays with the file and every earlier dot becomes a separator
- * (REQ-MAP-004). A name that begins with a dot is not decomposed.
+/* the separator that a category uses inside a document name: the dots of a
+ * class, routine or "other" document, the slashes of a CSP application path
+ * (REQ-MAP-004)
  */
-ULONG SplitDocumentName(PCWSTR Name, PWSTR** PSegments);
+WCHAR DocumentSeparator(PCWSTR Category);
+
+/* the name of a document in the form that the API expects in a request: no
+ * leading separator and forward slashes inside the name, e.g.
+ * "/csp/user/index.csp" becomes "csp/user/index.csp". The copy is allocated
+ * with malloc(); 0 on failure (REQ-MAP-005).
+ */
+PWSTR CanonicalDocumentName(PCWSTR Name);
+
+/* splits a document name into its package levels and its file name: the
+ * extension stays with the file and every earlier separator becomes a level
+ * (REQ-MAP-004). With dots, a name that begins with a dot is not decomposed;
+ * with slashes, empty segments are skipped.
+ */
+ULONG SplitDocumentName(PCWSTR Name, WCHAR Separator, PWSTR** PSegments);
 
 /* a segment that Windows would reject is not exposed (REQ-MAP-013) */
 BOOL IsLegalPathSegment(PCWSTR Segment);

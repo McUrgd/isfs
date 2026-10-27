@@ -70,7 +70,8 @@ typedef struct PTFS_PACKAGE_INDEX PTFS_PACKAGE_INDEX;
 /* a document descriptor of a category listing (api.md §9.2) */
 typedef struct
 {
-    PWSTR Name;     /* the canonical document name, e.g. "User.Person.cls" */
+    PWSTR Name;     /* the canonical document name, e.g. "User.Person.cls" or
+                     * "csp/user/index.csp" */
     PWSTR Category; /* CLS, CSP, RTN or OTH */
     PWSTR Db;       /* the database that holds the document */
     PWSTR Ts;       /* the server timestamp, "YYYY-MM-DD HH:MM:SS.mmm" */
@@ -112,7 +113,7 @@ typedef struct
     BOOLEAN IsDocument; /* an opened document: the content is held in memory (REQ-FS-013) */
     PWSTR Category; /* the category of a synthetic directory or of a document, e.g. "CLS" */
     PWSTR PackagePrefix; /* the package path of a synthetic directory, e.g. "User" */
-    PWSTR DocumentName; /* the canonical dotted name of a document */
+    PWSTR DocumentName; /* the canonical name of a document, e.g. "csp/user/index.csp" */
     PBYTE Content; /* the decoded content of a document (REQ-FS-013) */
     SIZE_T ContentSize; /* the size of Content in bytes (REQ-FS-006) */
     PWSTR Hash; /* the ETag of the document, its server hash (api.md §6) */
@@ -408,6 +409,19 @@ static NTSTATUS ParseCategoryListing(PBYTE Response, DWORD ResponseLength, PCWST
         Descriptors[Index].Db = Utf8ToWide(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(Item, "db")));
         Descriptors[Index].Ts = Utf8ToWide(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(Item, "ts")));
         Descriptors[Index].Generated = (BOOLEAN)(0 != cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(Item, "gen")));
+
+        /* the server spells the name of a CSP document with a leading slash,
+         * but its requests carry the same name without it (REQ-MAP-005); the
+         * descriptor keeps the form that is used by every request and the
+         * inverse of the decomposition stays exact
+         */
+        if (0 != Descriptors[Index].Name)
+        {
+            PWSTR Canonical = CanonicalDocumentName(Descriptors[Index].Name);
+
+            free(Descriptors[Index].Name);
+            Descriptors[Index].Name = Canonical;
+        }
 
         if (0 == Descriptors[Index].Name)
         {
@@ -808,7 +822,7 @@ static NTSTATUS LoadDocument(PTFS* Ptfs, PCWSTR DocumentName,
     if (0 != Hash && 0 != HashCch)
         Hash[0] = L'\0';
 
-    /* the dotted document name is used as-is by the API (api.md §4) */
+    /* the canonical document name is used as-is by the API (api.md §4) */
     if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"/doc/%s", DocumentName)))
         return STATUS_OBJECT_NAME_INVALID;
 
@@ -1474,8 +1488,8 @@ static NTSTATUS DeleteDocument(PTFS* Ptfs, PCWSTR DocumentName)
 typedef struct
 {
     PWSTR Name;         /* the name of the entry in the directory */
-    PWSTR PathName;     /* the dotted path of a package level */
-    PWSTR DocumentName; /* the dotted name of a document */
+    PWSTR PathName;     /* the path of a package level, e.g. "csp/user" */
+    PWSTR DocumentName; /* the canonical name of a document */
     BOOLEAN IsDirectory;
     UINT64 Timestamp;   /* the timestamp of the newest document below the entry */
     UINT64 IndexNumber;
@@ -1577,7 +1591,7 @@ static NTSTATUS AddDirEntry(PTFS_DIR_ENTRY** PEntries, ULONG* PCount, ULONG* PCa
 
 typedef struct
 {
-    PWSTR Prefix; /* the canonical dotted path of the level, "" for the category */
+    PWSTR Prefix; /* the canonical path of the level, "" for the category */
     PTFS_DIR_ENTRY* Entries;
     ULONG Count;
     ULONG Capacity;
@@ -1678,9 +1692,14 @@ static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
     ULONG AcceptedCount = 0, AcceptedCapacity = 0;
     ULONG HiddenSystemCount = 0;
     ULONG DescriptorIndex, SegmentIndex, PackageIndex, EntryIndex;
+    WCHAR Separator = DocumentSeparator(Category);
+    WCHAR SeparatorText[2];
     NTSTATUS Result = STATUS_SUCCESS;
 
     *PIndex = 0;
+
+    SeparatorText[0] = Separator;
+    SeparatorText[1] = L'\0';
 
     Index = malloc(sizeof *Index);
     if (0 == Index)
@@ -1743,7 +1762,7 @@ static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
         Accepted[AcceptedCount] = Descriptor->Name;
         AcceptedCount++;
 
-        SegmentCount = SplitDocumentName(Descriptor->Name, &Segments);
+        SegmentCount = SplitDocumentName(Descriptor->Name, Separator, &Segments);
         if (0 == SegmentCount)
             continue;
 
@@ -1793,8 +1812,8 @@ static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
                     Result = FAILED(StringCchCopyW(PathName, ARRAYSIZE(PathName),
                         Segments[Level])) ? STATUS_OBJECT_NAME_INVALID : STATUS_SUCCESS;
                 else
-                    Result = FAILED(StringCchPrintfW(PathName, ARRAYSIZE(PathName), L"%s.%s",
-                        Prefix, Segments[Level])) ? STATUS_OBJECT_NAME_INVALID : STATUS_SUCCESS;
+                    Result = FAILED(StringCchPrintfW(PathName, ARRAYSIZE(PathName), L"%s%c%s",
+                        Prefix, Separator, Segments[Level])) ? STATUS_OBJECT_NAME_INVALID : STATUS_SUCCESS;
 
                 if (NT_SUCCESS(Result))
                     Result = AddDirEntry(&Package->Entries, &Package->Count,
@@ -1802,7 +1821,7 @@ static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
 
                 /* the prefix of the next level, canonical for this document */
                 if (NT_SUCCESS(Result) && L'\0' != Prefix[0] &&
-                    FAILED(StringCchCatW(Prefix, ARRAYSIZE(Prefix), L".")))
+                    FAILED(StringCchCatW(Prefix, ARRAYSIZE(Prefix), SeparatorText)))
                     Result = STATUS_OBJECT_NAME_INVALID;
                 if (NT_SUCCESS(Result) &&
                     FAILED(StringCchCatW(Prefix, ARRAYSIZE(Prefix), Segments[Level])))
@@ -1942,8 +1961,8 @@ typedef struct
 {
     VOLUME_PATH_KIND Kind;
     PWSTR Category;      /* the category of the path */
-    PWSTR PackagePrefix; /* the dotted path of a package level */
-    PWSTR DocumentName;  /* the dotted name of a document */
+    PWSTR PackagePrefix; /* the path of a package level, e.g. "csp/user" */
+    PWSTR DocumentName;  /* the canonical name of a document */
 } VOLUME_PATH;
 
 static VOID VolumePathFree(VOLUME_PATH* Path)
@@ -2237,7 +2256,7 @@ static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* FileSystem,
 
 /* a document can only be created inside an existing category or package level:
  * the directories of the volume are synthetic and cannot be created
- * (REQ-FS-037). The dotted name is composed from the canonical package prefix
+ * (REQ-FS-037). The Atelier name is composed from the canonical package prefix
  * and the file name segment.
  */
 static NTSTATUS ComposeNewDocument(PTFS* Ptfs, PCWSTR FileName,
@@ -2251,6 +2270,7 @@ static NTSTATUS ComposeNewDocument(PTFS* Ptfs, PCWSTR FileName,
     ULONG LeafCount = 0;
     WCHAR ParentPath[2048];
     WCHAR DocumentName[2048];
+    WCHAR Separator = L'.';
     NTSTATUS Result;
 
     *PCategory = 0;
@@ -2271,10 +2291,12 @@ static NTSTATUS ComposeNewDocument(PTFS* Ptfs, PCWSTR FileName,
         goto exit;
     }
 
+    Separator = DocumentSeparator(Categories[Category]);
+
     /* the file name segment must not introduce a package level: package levels
      * are directories and cannot be created (REQ-MAP-004, REQ-FS-037)
      */
-    LeafCount = SplitDocumentName(Segments[Count - 1], &LeafSegments);
+    LeafCount = SplitDocumentName(Segments[Count - 1], Separator, &LeafSegments);
     if (0 == LeafCount)
     {
         Result = STATUS_INSUFFICIENT_RESOURCES;
@@ -2334,9 +2356,18 @@ static NTSTATUS ComposeNewDocument(PTFS* Ptfs, PCWSTR FileName,
             goto exit;
         }
 
-        if (FAILED(StringCchPrintfW(DocumentName, ARRAYSIZE(DocumentName), L"%s.%s",
-            0 != Parent.PackagePrefix ? Parent.PackagePrefix : Parent.Category,
-            Segments[Count - 1])))
+        if (0 == Parent.PackagePrefix)
+        {
+            if (FAILED(StringCchCopyW(DocumentName, ARRAYSIZE(DocumentName),
+                Segments[Count - 1])))
+            {
+                VolumePathFree(&Parent);
+                Result = STATUS_OBJECT_NAME_INVALID;
+                goto exit;
+            }
+        }
+        else if (FAILED(StringCchPrintfW(DocumentName, ARRAYSIZE(DocumentName), L"%s%c%s",
+            Parent.PackagePrefix, Separator, Segments[Count - 1])))
         {
             VolumePathFree(&Parent);
             Result = STATUS_OBJECT_NAME_INVALID;
@@ -3124,7 +3155,7 @@ static NTSTATUS Rename(FSP_FILE_SYSTEM* FileSystem,
         goto exit;
     }
 
-    /* the dotted name of the target is reconstructed from its path, so the PUT
+    /* the name of the target is reconstructed from its path, so the PUT
      * carries the Atelier name and not the path (REQ-MAP-016, REQ-FS-035)
      */
     Result = ComposeNewDocument(Ptfs, NewFileName, &Category, &DocumentName);

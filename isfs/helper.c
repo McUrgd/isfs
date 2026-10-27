@@ -115,7 +115,46 @@ VOID FreeSegments(PWSTR* Segments, ULONG Count)
     free(Segments);
 }
 
-ULONG SplitDocumentName(PCWSTR Name, PWSTR** PSegments)
+WCHAR DocumentSeparator(PCWSTR Category)
+{
+    /* the CSP documents of the API are application paths, e.g.
+     * "/csp/user/index.csp", and use the slash as their level separator;
+     * every other category uses the dots of the document name
+     */
+    return (0 != Category && 0 == _wcsicmp(Category, L"CSP")) ? L'/' : L'.';
+}
+
+PWSTR CanonicalDocumentName(PCWSTR Name)
+{
+    SIZE_T Length, Index, Out = 0;
+    PWSTR Copy;
+
+    if (0 == Name)
+        return 0;
+
+    /* the name of an existing CSP document begins with a slash, but the API
+     * addresses the same document without it (REQ-MAP-005)
+     */
+    while (L'/' == *Name || L'\\' == *Name)
+        Name++;
+
+    Length = wcslen(Name);
+    Copy = malloc((Length + 1) * sizeof(WCHAR));
+    if (0 == Copy)
+        return 0;
+
+    for (Index = 0; Index < Length; Index++)
+    {
+        WCHAR Ch = Name[Index];
+
+        Copy[Out++] = (L'\\' == Ch) ? L'/' : Ch;
+    }
+    Copy[Out] = L'\0';
+
+    return Copy;
+}
+
+ULONG SplitDocumentName(PCWSTR Name, WCHAR Separator, PWSTR** PSegments)
 {
     SIZE_T Length = wcslen(Name);
     ULONG Dots = 0, Count, Index, SegmentIndex = 0;
@@ -126,6 +165,12 @@ ULONG SplitDocumentName(PCWSTR Name, PWSTR** PSegments)
     PWSTR* Segments;
 
     *PSegments = 0;
+
+    /* a slash separated name has no extension rule: its segments are the
+     * non-empty parts of the path, and dots stay inside a segment
+     */
+    if (L'.' != Separator)
+        return SplitByDelimiter(Name, Separator, 0, PSegments);
 
     for (Ch = Name; L'\0' != *Ch; Ch++)
         if (L'.' == *Ch)
