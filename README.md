@@ -1,5 +1,7 @@
 # ISFS — InterSystems Atelier as a Windows drive
 
+[![build-and-test](https://github.com/McUrgd/isfs/actions/workflows/build.yml/badge.svg)](https://github.com/McUrgd/isfs/actions/workflows/build.yml)
+
 ISFS mounts an InterSystems IRIS/Caché namespace as a Windows drive letter and exposes its
 documents (`CLS`, `CSP`, `RTN`, `OTH`) as ordinary files, so Explorer, VS Code and the
 command line work against the server without Studio. The drive is a **view** over the
@@ -36,11 +38,10 @@ notices are in `NOTICE`.
 
 ## Demo
 
-<!-- TODO: save a screenshot as docs/images/demo.png and replace the caption
-     below with a Markdown image that points at it. -->
+![The namespace root as drive X:](docs/images/demo01.png)
+![A package below X:\CLS](docs/images/demo02.png)
 
-![root](docs/images/demo01.png)
-![dir](docs/images/demo02.png)
+_The namespace root and a package directory: the documents of the server as ordinary files._
 
 ## What works
 
@@ -65,13 +66,30 @@ notices are in `NOTICE`.
 
 ## Building
 
-The VS Code build task (`.vscode/tasks.json`, Ctrl+Shift+B) compiles and links with the
-vendored WinFsp headers and a locally copied import library, so no external SDK include
-path is required:
+```
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+```
+
+`scripts\build.ps1` is the single build entry point: the VS Code tasks (Ctrl+Shift+B) and
+the CI workflow both call it. It finds Visual Studio through `vswhere` and enters the
+developer shell when `cl.exe` is not already on `PATH`, copies the WinFsp import library
+and runtime DLL, and compiles with the flags of the configuration:
+
+| `-Configuration` | Flags | Output |
+|---|---|---|
+| `Debug` (default) | `/Zi /MT /D_DEBUG /D_CONSOLE /DUNICODE /D_UNICODE` | `isfs\isfs.exe` |
+| `Strict` | adds `/W4 /WX` (`/wd4100`; vendored headers exempt) | `isfs\w4\isfs.exe` |
+| `Analyze` | adds `/analyze` with `/analyze:WX-` | `isfs\analyze\isfs.exe` |
+
+`Strict` is the build that must stay green — CI enforces it next to the default one.
+`Analyze` reports MSVC static-analysis findings as warnings, so it links even when the
+analyzer has something to say; read its output instead of trusting the exit code.
+
+The same compilation by hand, from a Developer Command Prompt:
 
 ```
 cl /nologo /Zi /MT /D_DEBUG /D_CONSOLE /DUNICODE /D_UNICODE ^
-   /I passthrough /I . ^
+   /Ipassthrough /I. ^
    /Feisfs\isfs.exe /Foisfs\ isfs\isfs.c isfs\atelier.c isfs\helper.c cjson\cJSON.c ^
    /link passthrough\lib\winfsp-x64.lib advapi32.lib winhttp.lib
 ```
@@ -87,8 +105,8 @@ WinFsp SDK parts used by the build:
   by `scripts\copy-winfsp-lib.ps1` (not stored in the repository; it is a WinFsp build
   artifact, see `NOTICE`).
 
-The task also runs `scripts\copy-winfsp-dll.ps1`, which puts the runtime DLL next to the
-executable; see [Runtime DLL](#runtime-dll).
+Both WinFsp artifacts are copied on every run of the build script; see
+[Runtime DLL](#runtime-dll).
 
 ## Runtime DLL
 
@@ -104,9 +122,8 @@ WinFsp build artifact and is not stored in the repository.
 Both copies are done by scripts that search for the WinFsp installation (registry
 `HKLM\SOFTWARE\WOW6432Node\WinFsp`, then the `Program Files (x86)\WinFsp` fallback):
 `scripts\copy-winfsp-dll.ps1` for the runtime DLL and `scripts\copy-winfsp-lib.ps1`
-for the import library. They are called by the `winfsp: copy runtime dll` and
-`winfsp: copy import library` tasks via `powershell.exe -File`, i.e. without an
-intermediate shell, so that no nested quoting is involved.
+for the import library. `scripts\build.ps1` runs both on every build, so a fresh checkout
+needs nothing but an installed WinFsp — there is no separate preparation step.
 
 Alternatives:
 
@@ -204,6 +221,10 @@ Each script exits with 0 only when every check passed.
 
 Rebuild `isfs\isfs.exe` first: the checks report what that binary does. `-Drive` and `-Port`
 override the free drive letter and the port.
+
+The same three checks run in CI on `windows-2022` after a default and a `/W4 /WX` build; see
+[the CI workflow](.github/workflows/build.yml). It installs WinFsp with Chocolatey, mounts a
+drive letter, and uploads the mock, service and debug logs of every run as an artifact.
 
 ### Mock Atelier server
 

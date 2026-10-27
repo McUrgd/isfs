@@ -35,6 +35,7 @@
 # ---- build output ----
 /isfs/w4/
 /isfs/analyze/
+/artifacts/
 [Dd]ebug/
 [Rr]elease/
 x64/

@@ -1,0 +1,115 @@
+name: build-and-test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    # Pin the image on purpose: WinFsp installs a kernel driver and
+    # windows-latest is already Windows Server 2025, where driver support is
+    # not guaranteed. The checks mount a drive letter, so the driver matters.
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install WinFsp
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          choco install winfsp -y --no-progress
+          # 3010 and 1641 mean "installed, reboot required" and are fine here.
+          if ($LASTEXITCODE -notin 0, 3010, 1641) {
+              throw "choco install winfsp failed with exit code $LASTEXITCODE"
+          }
+
+          # Smoke check: without the driver the mounts below fail in a way that
+          # looks like an isfs bug, so fail here with the real reason instead.
+          $svc = Get-Service -Name 'WinFsp*' -ErrorAction SilentlyContinue
+          if (-not $svc) {
+              throw 'WinFsp did not register its service: the driver is not installed'
+          }
+          $svc | Format-Table Name, Status, StartType -AutoSize | Out-String | Write-Host
+
+          $install = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\WinFsp' -ErrorAction SilentlyContinue).InstallDir
+          if (-not $install) {
+              throw 'WinFsp is installed but HKLM:\SOFTWARE\WOW6432Node\WinFsp has no InstallDir'
+          }
+          Write-Host "WinFsp installed in $install"
+          Get-ChildItem (Join-Path $install 'bin\winfsp-x64.dll'), (Join-Path $install 'lib\winfsp-x64.lib') |
+              Format-Table FullName, Length -AutoSize | Out-String | Write-Host
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # scripts\build.ps1 is the same entry point the VS Code tasks use: it
+          # finds Visual Studio through vswhere, copies the WinFsp import
+          # library and runtime DLL, and compiles. Windows PowerShell is used
+          # because Enter-VsDevShell is a .NET Framework module.
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1 -Configuration Debug
+          if ($LASTEXITCODE) { throw "default build failed (exit $LASTEXITCODE)" }
+
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1 -Configuration Strict
+          if ($LASTEXITCODE) { throw "strict /W4 /WX build failed (exit $LASTEXITCODE)" }
+
+      - name: End-to-end checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # One script per behaviour; -Work puts the mock log, the service log
+          # and the debug log of isfs into artifacts\ so they can be uploaded.
+          # A failure does not stop the remaining checks: a full picture is
+          # more useful than the first failure.
+          $tests = @(
+              @{ Name = 'unmount'; Script = 'unmount-test.ps1' },
+              @{ Name = 'rename';  Script = 'rename-test.ps1'  },
+              @{ Name = 'delete';  Script = 'delete-test.ps1'  }
+          )
+          $failed = @()
+          foreach ($test in $tests) {
+              Write-Host "::group::$($test.Name)"
+              $work = Join-Path $PWD "artifacts\$($test.Name)"
+              powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts\$($test.Script)" -Work $work
+              if ($LASTEXITCODE) { $failed += "$($test.Name) (exit $LASTEXITCODE)" }
+              Write-Host '::endgroup::'
+          }
+
+          if ($failed) {
+              # Separate "the code is broken" from "the driver is not there".
+              Get-Service -Name 'WinFsp*' -ErrorAction SilentlyContinue |
+                  Format-Table Name, Status -AutoSize | Out-String | Write-Host
+              Get-PSDrive -PSProvider FileSystem |
+                  Format-Table Name, Used, Free -AutoSize | Out-String | Write-Host
+              throw "failed checks: $($failed -join ', ')"
+          }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: artifacts/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          # Safety net: a check that failed half-way may leave a mount behind.
+          Get-Process isfs -ErrorAction SilentlyContinue | Stop-Process -Force
