@@ -150,6 +150,7 @@ The volume root is the namespace itself: `X:\` shows the categories, and a docum
 | `-pass Password` | password, held in memory only |
 | `-m X:` | drive letter; mounting on a directory is not supported |
 | `-overwrite` | replace the server version on a conflict (`ignoreConflict=1`); off by default |
+| `-nosystem` | hide the system classes of `CLS` whose package starts with `%`; off by default |
 | `-d DebugFlags` | debug flags; `-1` enables all debug logs |
 | `-D DebugLogFile` | debug log file; `-` writes to stderr |
 
@@ -185,7 +186,8 @@ The v1 scope is deliberate; each item below is recorded in
 - Compile-on-save is not supported (REQ-FS-044).
 - The size reported by a listing or a stat is 0; the exact size appears only on an open
   handle whose content was fetched (REQ-FS-003, REQ-FS-006).
-- Generated documents are hidden (REQ-MAP-011); system documents follow the server default.
+- Generated documents are hidden (REQ-MAP-011); the system classes of `CLS` follow the
+  server default unless `-nosystem` is given (REQ-MAP-021).
 - Document timestamps are server-local and are not converted between time zones (REQ-FS-007).
 - Extended attributes, alternate data streams, symlinks, hard links, sparse files,
   compression and quotas are not representable in the Atelier API.

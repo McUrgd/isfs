@@ -26,6 +26,7 @@ service parameters and an interactive prompt are not supported in v1
 | Namespace (`-ns <namespace>`) | yes | — | REQ-MOUNT-009 |
 | Credentials: login (`-user`) | yes | — | REQ-MOUNT-010, 012 |
 | Credentials: password (`-pass`) | yes | — | REQ-MOUNT-010, 012 |
+| Hide system classes (`-nosystem`) | no | off | REQ-MAP-021 |
 | Connect/read timeout | no | 30 s | REQ-MOUNT-021 |
 
 ## Requirements

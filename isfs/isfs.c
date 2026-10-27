@@ -97,6 +97,7 @@ typedef struct
     PWSTR Namespace; /* the -ns value, used for the index numbers (REQ-FS-012) */
     ATELIER_CLIENT Client; /* the HTTP client of the mount */
     BOOLEAN IgnoreConflicts; /* -overwrite: ignoreConflict=1 on every save (REQ-FS-026) */
+    BOOLEAN HideSystem; /* -nosystem: hide the CLS classes of % packages (REQ-MAP-021) */
     volatile LONG Stopping; /* the volume is being unmounted: buffers are dropped (REQ-MOUNT-023) */
     PTFS_CATEGORY_CACHE Cache[CATEGORY_COUNT]; /* the descriptor caches */
 } PTFS;
@@ -1675,6 +1676,7 @@ static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
     PTFS_PACKAGE_INDEX* Index;
     PWSTR* Accepted = 0;
     ULONG AcceptedCount = 0, AcceptedCapacity = 0;
+    ULONG HiddenSystemCount = 0;
     ULONG DescriptorIndex, SegmentIndex, PackageIndex, EntryIndex;
     NTSTATUS Result = STATUS_SUCCESS;
 
@@ -1699,6 +1701,17 @@ static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
          */
         if (0 == Descriptor->Name || Descriptor->Generated)
             continue;
+
+        /* with -nosystem the system classes of CLS are not exposed: the package
+         * of a system class starts with '%', so the document name does too
+         * (REQ-MAP-021)
+         */
+        if (Ptfs->HideSystem && EqualsNameIgnoreCase(Category, L"CLS") &&
+            L'%' == Descriptor->Name[0])
+        {
+            HiddenSystemCount++;
+            continue;
+        }
 
         /* two documents that differ only by case: the first one is exposed
          * (REQ-MAP-010)
@@ -1819,6 +1832,10 @@ static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
                 Entry->IsDirectory ? Entry->PathName : Entry->DocumentName);
         }
     }
+
+    if (0 != HiddenSystemCount)
+        DebugLog(L"cache: %lu system document(s) of %s are hidden by -nosystem",
+            HiddenSystemCount, Category);
 
     *PIndex = Index;
     Index = 0;
@@ -3487,7 +3504,7 @@ static VOID PtfsDelete(PTFS* Ptfs);
  * (REQ-CONN-021)
  */
 static NTSTATUS PtfsCreate(PWSTR Namespace, ATELIER_CLIENT* Client, PWSTR BaseUrl,
-    PWSTR UserName, PWSTR Password, BOOLEAN IgnoreConflicts,
+    PWSTR UserName, PWSTR Password, BOOLEAN IgnoreConflicts, BOOLEAN HideSystem,
     PWSTR MountPoint, UINT32 DebugFlags,
     PTFS** PPtfs)
 {
@@ -3560,6 +3577,11 @@ static NTSTATUS PtfsCreate(PWSTR Namespace, ATELIER_CLIENT* Client, PWSTR BaseUr
      * (REQ-FS-026)
      */
     Ptfs->IgnoreConflicts = IgnoreConflicts;
+
+    /* the system classes of CLS are hidden only when the mount asks for it
+     * (REQ-MAP-021)
+     */
+    Ptfs->HideSystem = HideSystem;
 
     GetSystemTimeAsFileTime(&CreationTime);
 
@@ -3782,6 +3804,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     PWSTR Password = 0;
     PWSTR MountPoint = 0;
     BOOLEAN IgnoreConflicts = FALSE;
+    BOOLEAN HideSystem = FALSE;
     HANDLE DebugLogHandle = INVALID_HANDLE_VALUE;
     WCHAR NamespaceSegment[MAX_PATH];
     WCHAR BaseUrlBuf[MAX_PATH];
@@ -3816,6 +3839,12 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
         if (0 == wcscmp(argp[0], L"-overwrite"))
         {
             IgnoreConflicts = TRUE;
+            continue;
+        }
+        /* REQ-MAP-021: the system classes of CLS can be hidden */
+        if (0 == wcscmp(argp[0], L"-nosystem"))
+        {
+            HideSystem = TRUE;
             continue;
         }
         switch (argp[0][1])
@@ -3918,7 +3947,7 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     }
 
     Result = PtfsCreate(Namespace, &Client, BaseUrlBuf, UserName, Password,
-        IgnoreConflicts, MountPoint, DebugFlags, &Ptfs);
+        IgnoreConflicts, HideSystem, MountPoint, DebugFlags, &Ptfs);
     if (!NT_SUCCESS(Result))
     {
         fail(L"cannot create file system");
@@ -3948,6 +3977,12 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
     info(L"overwrite server version: %s",
         Ptfs->IgnoreConflicts ? L"enabled" : L"disabled");
 
+    /* the visibility of the system classes is reported at startup
+     * (REQ-MAP-021)
+     */
+    info(L"hide system classes: %s",
+        Ptfs->HideSystem ? L"enabled" : L"disabled");
+
     Service->UserContext = Ptfs;
     Result = STATUS_SUCCESS;
 
@@ -3975,6 +4010,7 @@ usage:
             "    -user Login         [Atelier login]\n"
             "    -pass Password      [Atelier password; kept in memory only]\n"
             "    -overwrite          [replace the server version on a conflict; off by default]\n"
+            "    -nosystem           [hide the CLS classes whose package starts with %%]\n"
             "    -m DriveLetter      [X: only; mounting on a directory is not supported]\n"
             "\n"
             "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos\n"

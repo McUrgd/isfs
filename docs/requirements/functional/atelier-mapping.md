@@ -393,6 +393,37 @@ server-side filter and is not used by the file system (api.md §8.2.1). The CSP
 documents of the namespace are exposed under `CSP\`, decomposed by the rule of
 REQ-MAP-004 like every other document.
 
+### REQ-MAP-021 — System classes can be hidden
+
+Status: implemented
+
+When the mount is started with `-nosystem`, the system classes of the `CLS`
+category must not be exposed. A system class is a document whose name starts
+with `%`, because the packages of the system classes are spelled that way.
+
+Acceptance criteria:
+- With `-nosystem`, a class such as `%Activate.Enum.cls` appears neither in the
+  `CLS` listing nor in a package level listing, and no `%` package level is
+  listed.
+- The path of a hidden class does not resolve: opening it fails with
+  `STATUS_OBJECT_NAME_NOT_FOUND`.
+- A document that starts with a user package stays visible, e.g.
+  `User.%Local.Sub.cls` is exposed as `CLS\User\%Local\Sub.cls`, because its
+  name does not start with `%`.
+- Without `-nosystem` the system classes are exposed as before
+  (REQ-MAP-012); the option is off by default.
+- The option affects only `CLS`: the listings of `CSP`, `RTN` and `OTH` are not
+  filtered.
+- The number of hidden documents of a category is reported in the debug log.
+
+> The filter is applied while the derived structure of the category is built,
+> so a hidden class is absent from the listings, from the package levels and
+> from the path resolution at once; no request is added by the option.
+>
+> Manual check: `scripts/nosystem-test.ps1` mounts the mock Atelier server
+> twice, with and without `-nosystem`, and verifies the `CLS` listing and the
+> reachability of the system and user documents.
+
 ## Decisions and open points affecting this area
 
 Decided in overview §12 and folded into the requirements above:
@@ -402,6 +433,8 @@ Decided in overview §12 and folded into the requirements above:
 - case collisions — resolved: the first name is exposed, the second is skipped
   with a warning (REQ-MAP-010).
 - generated documents — resolved: they are not exposed (REQ-MAP-011).
+- system classes — resolved: they are exposed by default and hidden only when
+  the mount is started with `-nosystem` (REQ-MAP-021).
 - rename across namespaces — resolved: not applicable, the namespace is fixed
   for the mount (REQ-MAP-001).
 - the visibility of a file that was created but not yet flushed — resolved: it

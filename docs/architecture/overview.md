@@ -434,8 +434,9 @@ tracked.
    applied and none is configurable (REQ-FS-007). A client in another zone sees shifted
    timestamps, which is an accepted v1 limitation.
 8. **Generated/system documents** — resolved: generated documents are not exposed, the
-   listing does not request `generated=1` (REQ-MAP-011, REQ-FS-002). System documents are
-   not filtered separately in v1: the server default applies.
+   listing does not request `generated=1` (REQ-MAP-011, REQ-FS-002). System documents follow
+   the server default; the `-nosystem` option hides the `CLS` classes whose package starts
+   with `%` for the whole mount and is off by default (REQ-MAP-021).
 9. **Rename across namespaces** — resolved: not applicable. The namespace is fixed by
    `-ns`, so only category moves within the mounted namespace exist (see §4.3).
 10. **Authentication** — resolved: the login and password are passed as the `-user` and
