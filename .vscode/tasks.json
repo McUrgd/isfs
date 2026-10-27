@@ -2,127 +2,21 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "winfsp: copy runtime dll",
-            "type": "process",
-            "command": "powershell.exe",
-            "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}\\scripts\\copy-winfsp-dll.ps1",
-                "-DestinationDir",
-                "${workspaceFolder}\\isfs"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "silent",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "winfsp: copy import library",
-            "type": "process",
-            "command": "powershell.exe",
-            "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}\\scripts\\copy-winfsp-lib.ps1",
-                "-DestinationDir",
-                "${workspaceFolder}\\passthrough\\lib"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "silent",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "isfs: prepare warning build",
-            "type": "process",
-            "command": "powershell.exe",
-            "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                "New-Item -ItemType Directory -Force -Path '${workspaceFolder}\\isfs\\w4','${workspaceFolder}\\isfs\\analyze' | Out-Null"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "silent",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "winfsp: copy runtime dll (w4)",
-            "type": "process",
-            "command": "powershell.exe",
-            "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}\\scripts\\copy-winfsp-dll.ps1",
-                "-DestinationDir",
-                "${workspaceFolder}\\isfs\\w4"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "dependsOn": [
-                "isfs: prepare warning build"
-            ],
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "silent",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "type": "cppbuild",
             "label": "isfs: build",
-            "command": "cl.exe",
+            "type": "process",
+            "command": "powershell.exe",
             "args": [
-                "/nologo",
-                "/Zi",
-                "/MT",
-                "/D_DEBUG",
-                "/D_CONSOLE",
-                "/DUNICODE",
-                "/D_UNICODE",
-                "/I${workspaceFolder}\\passthrough",
-                "/I${workspaceFolder}",
-                "/Fe${workspaceFolder}\\isfs\\isfs.exe",
-                "/Fo${workspaceFolder}\\isfs\\",
-                "/Fd${workspaceFolder}\\isfs\\",
-                "${workspaceFolder}\\isfs\\isfs.c",
-                "${workspaceFolder}\\isfs\\atelier.c",
-                "${workspaceFolder}\\isfs\\helper.c",
-                "${workspaceFolder}\\cjson\\cJSON.c",
-                "/link",
-                "${workspaceFolder}\\passthrough\\lib\\winfsp-x64.lib",
-                "advapi32.lib",
-                "winhttp.lib"
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\build.ps1",
+                "-Configuration",
+                "Debug"
             ],
             "options": {
-                "cwd": "${fileDirname}"
+                "cwd": "${workspaceFolder}"
             },
-            "dependsOn": [
-                "winfsp: copy runtime dll",
-                "winfsp: copy import library"
-            ],
             "problemMatcher": [
                 "$msCompile"
             ],
@@ -130,97 +24,66 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "detail": "WinFsp: passthrough\\winfsp (headers) + passthrough\\lib\\winfsp-x64.lib + winhttp.lib; JSON: cjson (cJSON.c); winfsp-x64.dll is copied next to the exe"
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "detail": "scripts\\build.ps1 -Configuration Debug: copies winfsp-x64.lib and winfsp-x64.dll from the installed WinFsp SDK, then compiles with cl.exe (found through vswhere when it is not on PATH). Output: isfs\\isfs.exe."
         },
         {
-            "type": "cppbuild",
             "label": "isfs: build (W4/WX)",
-            "command": "cl.exe",
+            "type": "process",
+            "command": "powershell.exe",
             "args": [
-                "/nologo",
-                "/W4",
-                "/WX",
-                "/wd4100",
-                "/external:I${workspaceFolder}\\passthrough",
-                "/external:W0",
-                "/Zi",
-                "/MT",
-                "/D_DEBUG",
-                "/D_CONSOLE",
-                "/DUNICODE",
-                "/D_UNICODE",
-                "/I${workspaceFolder}",
-                "/Fe${workspaceFolder}\\isfs\\w4\\isfs.exe",
-                "/Fo${workspaceFolder}\\isfs\\w4\\",
-                "/Fd${workspaceFolder}\\isfs\\w4\\",
-                "${workspaceFolder}\\isfs\\isfs.c",
-                "${workspaceFolder}\\isfs\\atelier.c",
-                "${workspaceFolder}\\isfs\\helper.c",
-                "${workspaceFolder}\\cjson\\cJSON.c",
-                "/link",
-                "${workspaceFolder}\\passthrough\\lib\\winfsp-x64.lib",
-                "advapi32.lib",
-                "winhttp.lib"
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\build.ps1",
+                "-Configuration",
+                "Strict"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "dependsOn": [
-                "isfs: prepare warning build",
-                "winfsp: copy runtime dll (w4)",
-                "winfsp: copy import library"
-            ],
-            "dependsOrder": "sequence",
             "problemMatcher": [
                 "$msCompile"
             ],
             "group": "build",
-            "detail": "Strict compiler warnings: /W4 /WX. C4100 (unused WinFsp callback parameters) and warnings from vendored WinFsp headers are suppressed; output goes to isfs\\w4."
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "detail": "scripts\\build.ps1 -Configuration Strict: strict compiler warnings (/W4 /WX). C4100 (unused WinFsp callback parameters) and warnings from the vendored WinFsp headers are suppressed. Output: isfs\\w4\\isfs.exe."
         },
         {
-            "type": "cppbuild",
             "label": "isfs: analyze",
-            "command": "cl.exe",
+            "type": "process",
+            "command": "powershell.exe",
             "args": [
-                "/nologo",
-                "/W4",
-                "/analyze",
-                "/analyze:WX-",
-                "/analyze:external-",
-                "/wd4100",
-                "/external:I${workspaceFolder}\\passthrough",
-                "/external:W0",
-                "/Zi",
-                "/MT",
-                "/D_DEBUG",
-                "/D_CONSOLE",
-                "/DUNICODE",
-                "/D_UNICODE",
-                "/I${workspaceFolder}",
-                "/Fe${workspaceFolder}\\isfs\\analyze\\isfs.exe",
-                "/Fo${workspaceFolder}\\isfs\\analyze\\",
-                "/Fd${workspaceFolder}\\isfs\\analyze\\",
-                "${workspaceFolder}\\isfs\\isfs.c",
-                "${workspaceFolder}\\isfs\\atelier.c",
-                "${workspaceFolder}\\isfs\\helper.c",
-                "${workspaceFolder}\\cjson\\cJSON.c",
-                "/link",
-                "${workspaceFolder}\\passthrough\\lib\\winfsp-x64.lib",
-                "advapi32.lib",
-                "winhttp.lib"
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\build.ps1",
+                "-Configuration",
+                "Analyze"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "dependsOn": [
-                "isfs: prepare warning build",
-                "winfsp: copy import library"
-            ],
             "problemMatcher": [
                 "$msCompile"
             ],
             "group": "build",
-            "detail": "MSVC static analysis: /analyze with /analyze:WX- (analyzer findings are warnings, not errors). Slow; keep it separate from the default build. Output goes to isfs\\analyze."
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "detail": "scripts\\build.ps1 -Configuration Analyze: MSVC static analysis (/analyze with /analyze:WX-, so analyzer findings are warnings). Slow; keep it separate from the default build. Output: isfs\\analyze\\isfs.exe."
         }
     ]
 }
