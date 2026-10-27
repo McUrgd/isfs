@@ -14,7 +14,7 @@ retiring a requirement file.
 | Mount / attach lifecycle (drive letter, connect, disconnect) | [`functional/mount-lifecycle.md`](functional/mount-lifecycle.md) | implemented |
 | Filesystem operations (read, write, create, delete, rename, directory listing) | [`functional/filesystem-operations.md`](functional/filesystem-operations.md) | implemented |
 | Mapping of Atelier resources (packages, directories) to filesystem paths | [`functional/atelier-mapping.md`](functional/atelier-mapping.md) | implemented |
-| Connection and authentication (server, credentials, session handling) | `functional/connection-auth.md` | implemented |
+| Connection and authentication (server, credentials, session handling) | [`functional/connection-auth.md`](functional/connection-auth.md) | implemented |
 | Errors, diagnostics and logging | `functional/errors-diagnostics.md` | planned |
 | Caching and performance behaviour | `functional/caching.md` | planned |
 

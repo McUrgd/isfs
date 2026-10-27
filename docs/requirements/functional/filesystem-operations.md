@@ -8,13 +8,13 @@ themselves — which Atelier call backs an operation, what a caller observes, ho
 content is encoded, and which operations are refused. The mapping of paths and
 names onto Atelier resources is in `atelier-mapping.md`; the mount lifecycle is in
 `mount-lifecycle.md`; the transport and the credentials are in
-`connection-auth.md`; the caches and the prefetch modes are in `caching.md`; the
-canonical HTTP-to-NTSTATUS table and the log formats are in
-`errors-diagnostics.md`.
+`connection-auth.md`; the caches and the prefetch modes are covered by the
+planned `caching.md`; the canonical HTTP-to-NTSTATUS table and the log formats
+are covered by the planned `errors-diagnostics.md`.
 
 Source sections of [`docs/architecture/overview.md`](../../architecture/overview.md):
 §4 (operations), §5 (document representation), §6 (metadata synthesis),
-§9 (concurrency and locking), §11 (not mapped), §12 (open decisions).
+§9 (concurrency and locking), §11 (not mapped), §12 (resolved design decisions).
 Source sections of [`docs/architecture/api.md`](../../architecture/api.md):
 §5 (content encoding), §6 (hashing, ETags and conflicts), §8.2 (listing),
 §8.3 (documents), §12 (implementation notes and discrepancies).
@@ -63,7 +63,7 @@ Acceptance criteria:
 - The root listing is not part of this requirement: the contents of `\` are
   defined by REQ-MAP-001 and REQ-MAP-002.
 - The listing is served from the descriptor cache where the cache is valid; the
-  cache behaviour itself is defined in `caching.md`.
+  cache behaviour itself is not specified here; see the planned `caching.md`.
 
 ### REQ-FS-002 — Generated documents are not listed
 
@@ -152,8 +152,8 @@ Acceptance criteria:
 
 > Known limitation: `ts` has the form `YYYY-MM-DD HH:MM:SS.mmm` without an
 > offset, so the time zone of the server cannot be established. A client in a
-> different zone sees shifted timestamps. This is accepted for v1 (overview §6);
-> overview §12.7 keeps a configurable offset as an open point.
+> different zone sees shifted timestamps. This is accepted for v1 (overview §6,
+> §12.7); a configurable offset is not implemented.
 
 ### REQ-FS-008 — Attributes distinguish synthetic directories from documents
 
@@ -372,9 +372,9 @@ Acceptance criteria:
   base64.
 - The decision is taken from the buffer, not from the file name.
 
-> Open point: overview §12.5 keeps open whether the detection is replaced by a
-> list of binary extensions and what happens with a mixed text document. The
-> requirement above implements the sniffing variant for v1.
+> Decided in overview §12.5: the detection is content sniffing, not a list of
+> binary extensions; a buffer that is not valid UTF-8 or contains a NUL byte is
+> written as binary. A mixed text document is therefore written as binary.
 
 ### REQ-FS-024 — A document cannot be extended beyond its content
 
@@ -417,9 +417,8 @@ Acceptance criteria:
   `ignoreConflict=1` and the server version is replaced.
 - The option is off by default and is reported in the startup log.
 
-> Open point: overview §12.4 keeps open whether the conflict policy is a
-> per-mount option or a per-operation decision. The requirement above implements
-> a per-mount option that is off by default.
+> Decided in overview §12.4: the conflict policy is a per-mount option that is
+> off by default, not a per-operation decision.
 
 ### REQ-FS-027 — The cache is updated from the answer of the server
 
@@ -631,30 +630,29 @@ Status: dropped
 
 Compiling a document after it was saved is intentionally unsupported in v1.
 Rationale: the endpoint table of the overview classifies `compile` as a
-control-plane call with no filesystem semantics (overview §4.2, §11); the
-in-scope list of overview §1 still names a compile-on-save action, which
-contradicts it.
+control-plane call with no filesystem semantics (overview §4.2, §11), and the
+in-scope list of overview §1 does not name a compile-on-save action.
 
-> Open point: the contradiction between overview §1 and overview §4.2 has to be
-> resolved before the requirement above can be closed. A compile on save would
+> Decided: overview §1 and §4.2 agree that compilation is out of scope, so the
+> contradiction that blocked this requirement is gone. A compile on save would
 > need its own requirements (when it runs, what a compile error means for the
 > flush, how the result is reported to the caller).
 
-## Open decisions affecting this area
+## Decisions affecting this area
 
-From overview §12, to be resolved and folded into the requirements above:
+Decided in overview §12 and folded into the requirements above:
 
 - size strategy — lazy: 0 in listings and stat (REQ-FS-003), exact size for an
   open handle after the content was fetched (REQ-FS-006); batch prefetch is
   deferred together with the content cache.
 - conflict policy — resolved for v1 as a per-mount option that is off by default
   (REQ-FS-026).
-- binary detection — resolved for v1 as a content sniffing (REQ-FS-023); the
-  extension list remains an open option.
-- timestamp time zone — the `ts` is used as local time (REQ-FS-007); a
-  configurable offset remains an open option.
-- compile on save — dropped for v1, with a contradiction in the overview to
-  resolve (REQ-FS-044).
+- binary detection — resolved for v1 as content sniffing (REQ-FS-023); no
+  extension list is used.
+- timestamp time zone — the `ts` is used as local time (REQ-FS-007); no
+  configurable offset is implemented.
+- compile on save — dropped for v1 (REQ-FS-044); overview §1 and §4.2 now agree
+  that compilation is out of scope.
 
 Resolved: a refused directory operation reports `STATUS_NOT_SUPPORTED`
 (REQ-FS-036, REQ-FS-037), because the operation is not part of the file system

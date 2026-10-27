@@ -1,7 +1,8 @@
 # Architecture Overview
 
-Status: design baseline (draft). The repository currently contains the WinFsp passthrough
-skeleton (`isfs/isfs.c`); the Atelier integration described below is planned.
+Status: implemented baseline. The design below is what `isfs/` implements; the functional
+requirements in `docs/requirements/` are the authoritative, itemised record of the
+behaviour and carry their own status.
 
 This document maps the InterSystems Atelier v1 API base path `/api/atelier/v1` onto Windows filesystem operations exposed through WinFsp.
 
@@ -14,12 +15,11 @@ existence.
 
 In scope:
 
-- expose the namespace passed in `-ns` as the volume root and its documents (`CLS`, `CSP`) as files;
+- expose the namespace passed in `-ns` as the volume root and its documents (`CLS`, `CSP`, `RTN`, `OTH`) as files;
 - implement read, write, create, delete, rename and metadata queries by translating them into Atelier REST calls;
 - map Atelier/server errors to NTSTATUS values that Windows applications understand.
-- compile-on-save action;
 
-Out of scope are 
+Out of scope:
 
 - creating/deleting namespaces or category directories;
 - index/query actions;
@@ -29,7 +29,7 @@ Out of scope are
 
 ## 2. Source of truth and components
 
-current doc and `requrements` describe URL map, request formats,
+This document and the requirements describe the URL map, request formats,
 response formats and HTTP status codes used by this design. Where the XML documentation is
 ambiguous, the XML wins over assumptions in this document.
 
@@ -388,37 +388,49 @@ entries.
 | Sparse files, compression, quotas | no API support |
 | Truncate/extend via `SetFileSize` beyond current content | replacement upload only; extension is rejected |
 
-## 12. Open decisions
+## 12. Resolved design decisions
 
-These must be resolved and recorded as requirements before implementation:
+Every open point of the design phase has been decided and folded into the functional
+requirements. The list below records the decision and names the requirement that holds the
+binding text; the requirement files, not this section, are where new open points are
+tracked.
 
 1. **Namespace selection** — resolved: the namespace is passed as the `-ns` parameter of
    `isfs.exe` and becomes the volume root. There is no namespace discovery and no namespace
    directory in the tree. The mount validates the namespace with `GET /:namespace`; a wrong
-   or inaccessible namespace fails the mount (see
-   [`mount-lifecycle.md`](../requirements/functional/mount-lifecycle.md), which still
-   describes the former discovery probe and must be updated to match).
+   or inaccessible namespace fails the mount (REQ-MOUNT-009,
+   [`mount-lifecycle.md`](../requirements/functional/mount-lifecycle.md)).
 2. **Path layout** — resolved: nested package directories. The dots of an Atelier document
    name become directory levels (§3.1), so `User.Person.cls` is exposed as
    `\<CAT>\User\Person.cls`. The layout is lossless in both directions, because the
    extension is the part after the last dot and the name is reconstructed by joining the
-   path segments with dots; no escaping scheme is needed (§3.1).
-3. **Size strategy** — default lazy (0 in listings) vs opt-in batch prefetch; measure the
-   cost on large namespaces.
-4. **Conflict policy** — always fail on `409`, or offer a per-mount "force overwrite"
-   option that adds `ignoreConflict=1`.
-5. **Binary detection** — extension allow-list vs UTF-8/NUL sniffing; what to do with
-   mixed/undecodable text.
-6. **Case collisions** — skip duplicates, suffix them, or fail the mount; log format.
-7. **Timestamp time zone** — accept server-local `ts` as-is, or add a configurable offset.
-8. **Generated/system documents** — default visibility and `hideSystemDocuments` defaults.
+   path segments with dots; no escaping scheme is needed (REQ-MAP-004, REQ-MAP-005).
+3. **Size strategy** — resolved: lazy. Listings and stat report 0, an open handle reports the
+   exact size once the content is fetched (REQ-FS-003, REQ-FS-006); batch prefetch is
+   deferred together with the content cache.
+4. **Conflict policy** — resolved: the save is conditional on the hash taken at open and a
+   conflict fails the flush, keeping the buffer dirty (REQ-FS-025). The `-overwrite` option
+   turns on `ignoreConflict=1` for the whole mount and is off by default (REQ-FS-026).
+5. **Binary detection** — resolved: content sniffing. A buffer that is valid UTF-8 and
+   contains no NUL byte is written as text, anything else as base64 (REQ-FS-023). An
+   extension allow-list is not used.
+6. **Case collisions** — resolved: the first name is exposed, the second is skipped and a
+   warning is logged (REQ-MAP-010).
+7. **Timestamp time zone** — resolved: `ts` is used as server-local time; no offset is
+   applied and none is configurable (REQ-FS-007). A client in another zone sees shifted
+   timestamps, which is an accepted v1 limitation.
+8. **Generated/system documents** — resolved: generated documents are not exposed, the
+   listing does not request `generated=1` (REQ-MAP-011, REQ-FS-002). System documents are
+   not filtered separately in v1: the server default applies.
 9. **Rename across namespaces** — resolved: not applicable. The namespace is fixed by
    `-ns`, so only category moves within the mounted namespace exist (see §4.3).
 10. **Authentication** — resolved: the login and password are passed as the `-user` and
     `-pass` parameters of `isfs.exe` and kept in memory only (REQ-MOUNT-010). The mount
     probe presents them as HTTP Basic to `GET /:namespace`; a web-session scheme is not
-    used in v1 (REQ-MOUNT-012).
-11. **Read-only namespaces** — configuration list (for example `%SYS`) vs rely on `403`.
+    used in v1 (REQ-MOUNT-012, REQ-CONN-006, REQ-CONN-009).
+11. **Read-only namespaces** — resolved: there is no client-side list. The server answers
+    `403` and it is mapped to `STATUS_ACCESS_DENIED` (REQ-CONN-016); a client-side list of
+    namespace rights is dropped (REQ-CONN-017).
 12. **Volume size/free size** — resolved: a constant synthetic capacity
     (`TotalSize = FreeSize = 1 TiB`) is reported so that Windows and applications that
     pre-check free space do not treat the volume as full; the values are not configurable
@@ -435,8 +447,8 @@ These must be resolved and recorded as requirements before implementation:
 | Errors, diagnostics and logging | §7, §10 |
 | Caching and performance | §6, §8 |
 
-The requirement files themselves are indexed in `docs/requirements/README.md`; IDs will be
-assigned when each area's first requirement is written.
+The requirement files themselves are indexed in `docs/requirements/README.md`; every
+requirement carries a stable ID and its own status.
 
 ## 14. Related documents
 

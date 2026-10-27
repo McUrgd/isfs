@@ -8,12 +8,13 @@ the path model — the volume root, the category directories, the package levels
 the decomposition of a document name and the resolution of a path. What the
 file system callbacks do with a resolved path is in `filesystem-operations.md`;
 the mount lifecycle is in `mount-lifecycle.md`; the transport and the
-credentials are in `connection-auth.md`; the caches are in `caching.md`; the
-error mapping and the log formats are in `errors-diagnostics.md`.
+credentials are in `connection-auth.md`; the caches are covered by the planned
+`caching.md`; the error mapping and the log formats are covered by the planned
+`errors-diagnostics.md`.
 
 Source sections of [`docs/architecture/overview.md`](../../architecture/overview.md):
 §3 (volume and path model), §3.1 (name decomposition), §4.2 (operations),
-§4.3 (rename semantics), §6 (metadata synthesis), §12 (open decisions).
+§4.3 (rename semantics), §6 (metadata synthesis), §12 (resolved design decisions).
 Source sections of [`docs/architecture/api.md`](../../architecture/api.md):
 §4 (names, extensions and categories), §8.2.1 (document listing), §13 (usage in
 ISFS).
@@ -230,8 +231,8 @@ Acceptance criteria:
   resolves to the exposed document, because the comparison is
   case-insensitive (REQ-MAP-009).
 
-> Resolved: overview §12.6 keeps the choice between skipping the duplicate,
-> suffixing it and failing the mount open. The requirement above implements
+> Decided in overview §12.6: the choice was between skipping the duplicate,
+> suffixing it and failing the mount. The requirement above implements
 > skipping the duplicate, because suffixing would produce a name that does not
 > exist on the server and failing the mount would make the whole namespace
 > unusable for one pair of documents.
@@ -392,9 +393,9 @@ server-side filter and is not used by the file system (api.md §8.2.1). The CSP
 documents of the namespace are exposed under `CSP\`, decomposed by the rule of
 REQ-MAP-004 like every other document.
 
-## Open decisions affecting this area
+## Decisions and open points affecting this area
 
-From overview §12, to be resolved and folded into the requirements above:
+Decided in overview §12 and folded into the requirements above:
 
 - path layout — resolved: the package levels are directories, the dots of the
   name are the levels (REQ-MAP-004, REQ-MAP-005).

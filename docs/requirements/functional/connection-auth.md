@@ -8,11 +8,11 @@ credentials taken from the command line, the lifetime of the connection and the
 mapping of connection failures. The mount lifecycle itself (when the probe runs,
 what a failed mount looks like) is in `mount-lifecycle.md`; file and directory
 semantics are in `filesystem-operations.md` and `atelier-mapping.md`; the log
-and error message formats are in `errors-diagnostics.md`.
+and error message formats are covered by the planned `errors-diagnostics.md`.
 
 Source sections of [`docs/architecture/overview.md`](../../architecture/overview.md):
 §2 (components), §7 (error mapping), §9 (concurrency), §10 (diagnostics),
-§12 (open decisions).
+§12 (resolved design decisions).
 Source sections of [`docs/architecture/api.md`](../../architecture/api.md):
 §2 (base URL, transport and authentication), §10 (HTTP status summary).
 
@@ -414,14 +414,14 @@ second time; the caller decides when to retry, and the conditional write
 (overview §4.4, `filesystem-operations.md`) turns the second attempt into a
 conflict instead of a silent overwrite.
 
-## Open decisions affecting this area
+## Decisions affecting this area
 
 Resolved: the scheme is always `http` and TLS is not supported
 (REQ-CONN-001, REQ-CONN-002). This closes the open point of REQ-MOUNT-009.
 
 Resolved: every request carries HTTP Basic credentials taken from `-user` and
-`-pass`, and no session is created (REQ-CONN-006, REQ-CONN-009). This closes
-the open point 10 of overview §12.
+`-pass`, and no session is created (REQ-CONN-006, REQ-CONN-009). This is
+overview §12, item 10.
 
 Resolved: the configuration surface is the command line only
 (REQ-CONN-018).

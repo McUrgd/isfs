@@ -6,11 +6,11 @@ Scope: attaching the ISFS volume to Windows, its identity and initial state, the
 checks against the Atelier server, and detaching it again. Content semantics (paths, files,
 metadata) are in `atelier-mapping.md` and `filesystem-operations.md`; how credentials are
 presented to the server and session handling are in `connection-auth.md`; error/log formats
-are in `errors-diagnostics.md`.
+are covered by the planned `errors-diagnostics.md`.
 
 Source sections of [`docs/architecture/overview.md`](../../architecture/overview.md):
 §2 (components), §3 (volume and path model), §6 (metadata synthesis), §9 (concurrency),
-§10 (diagnostics), §12 (open decisions).
+§10 (diagnostics), §12 (resolved design decisions).
 
 ## Mount-time configuration
 
@@ -307,7 +307,7 @@ Acceptance criteria:
 > mount the volume against the mock server and open, browse and modify documents
 > through it.
 
-## Open decisions affecting this area
+## Decisions affecting this area
 
 Dropped: a mount-wide read-only mode is not supported in v1; write protection comes from
 the server, which answers `403` (REQ-MOUNT-020, REQ-CONN-016).
