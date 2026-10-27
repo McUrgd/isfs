@@ -325,7 +325,7 @@ The release is created through the GitHub API with `GITHUB_TOKEN` when it is set
 with the credential git already uses for `origin`. The token is never printed and never
 written to disk. The script refuses to run from another branch, on a dirty tree, when
 `main` differs from `origin/main`, and when the tag already exists, so a failed attempt
-leaves nothing half-published except, in the worst case, a local tag.
+leaves nothing half-published: at worst a local commit and a local tag remain.
 
 ## Third-party
 
