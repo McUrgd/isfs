@@ -173,15 +173,28 @@ try
         Invoke-Git @('commit', '-m', "docs: bump the version to $minor")
     }
 
-    $tagArgs = @('tag', '-a', $tag, '-m', "ISFS $Version")
+    # The message of the tag is passed through a file: PowerShell 5.1 does not
+    # quote an argument that contains a newline when it builds the command line
+    # of a native command, so `git tag -m <notes>` with a multi-line text is
+    # split into many arguments and git rejects it with "too many arguments".
+    $tagArgs = @('tag', '-a', $tag)
+    $tagMessage = ''
     if ($notes)
     {
-        $tagArgs += @('-m', $notes)
+        $tagMessage = [IO.Path]::GetTempFileName()
+        [IO.File]::WriteAllText($tagMessage, "ISFS $Version`n`n$notes`n",
+            (New-Object Text.UTF8Encoding($false)))
+        $tagArgs += @('-F', $tagMessage)
+    }
+    else
+    {
+        $tagArgs += @('-m', "ISFS $Version")
     }
 
     if ($DryRun)
     {
-        Write-Step "would run: git $($tagArgs -join ' ')"
+        $message = if ($notes) { "the text of $NotesFile" } else { "ISFS $Version" }
+        Write-Step "would run: git tag -a $tag (message: $message)"
         if ($readmeChanged)
         {
             Write-Step 'would push: main'
@@ -203,10 +216,25 @@ try
                 Write-Step "would publish the GitHub release $tag with $source"
             }
         }
+
+        if ($tagMessage)
+        {
+            Remove-Item -LiteralPath $tagMessage -ErrorAction SilentlyContinue
+        }
         return
     }
 
-    Invoke-Git $tagArgs
+    try
+    {
+        Invoke-Git $tagArgs
+    }
+    finally
+    {
+        if ($tagMessage)
+        {
+            Remove-Item -LiteralPath $tagMessage -ErrorAction SilentlyContinue
+        }
+    }
     Write-Step "tagged $tag"
 
     if ($NoPush)
