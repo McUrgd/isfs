@@ -1,27 +1,27 @@
 # AGENTS.md
 
-## Проект
+## Project
 This project exposes the InterSystems Atelier v1 REST API (the `/api/atelier/v1` API that
 any Caché/IRIS installation serves, not the Eclipse-based Atelier IDE) as a Windows
 filesystem.
 
-## Карта документации
-- Требования: `docs/requirements/README.md` (индекс) и `docs/requirements/functional/`
-- Архитектура: `docs/architecture/overview.md`
-- API: `docs/architecture/api.md` (описание Atelier API v1)
+## Documentation map
+- Requirements: `docs/requirements/README.md` (index) and `docs/requirements/functional/`
+- Architecture: `docs/architecture/overview.md`
+- API: `docs/architecture/api.md` (a description of the Atelier v1 API)
 
-## Отладка памяти (Application Verifier / PageHeap / cdb)
+## Memory debugging (Application Verifier / PageHeap / cdb)
 
-### Application Verifier и PageHeap
+### Application Verifier and PageHeap
 
-Application Verifier установлен в системе:
+Application Verifier is installed on this system:
 
-- `C:\Windows\System32\appverif.exe`, версия `10.0.26100.8249`;
-- настройка и запрос требуют консоли с правами администратора.
+- `C:\Windows\System32\appverif.exe`, version `10.0.26100.8249`;
+- configuration and querying require an elevated console.
 
-PageHeap можно включить двумя способами (оба требуют elevation).
+PageHeap can be enabled in two ways (both require elevation).
 
-Через Application Verifier:
+With Application Verifier:
 
 ```cmd
 appverif -enable heaps -for isfs.exe -with heaps.full=true
@@ -30,34 +30,34 @@ appverif -disable * -for isfs.exe
 appverif -delete settings -for isfs.exe
 ```
 
-Через `gflags.exe` из Debugging Tools:
+With `gflags.exe` from Debugging Tools:
 
 ```cmd
 "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\gflags.exe" /p /enable isfs.exe /full
 "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\gflags.exe" /p /disable isfs.exe
 ```
 
-Настройки привязаны к имени образа (IFEO) и действуют на все его запуски,
-поэтому после теста их нужно отключать. PageHeap ловит invalid free, double
-free и выход за границу блока в момент ошибки.
+The settings are bound to the image name (IFEO) and apply to every launch of it,
+so they must be disabled after the test. PageHeap catches an invalid free, a double
+free and a write past the end of a block at the moment the error happens.
 
-### Отладчик cdb
+### The cdb debugger
 
-Debugging Tools for Windows установлены, но их каталог не входит в `PATH`:
+Debugging Tools for Windows is installed, but its directory is not on `PATH`:
 
-- `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe` — консольный
-  отладчик, версия `10.0.28000.2957`;
+- `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe` — the console
+  debugger, version `10.0.28000.2957`;
 - `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\windbg.exe` — GUI;
 - `C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\gflags.exe` — PageHeap.
 
-Запуск `isfs.exe` под `cdb` (из каталога, где лежат `isfs.exe` и
+Starting `isfs.exe` under `cdb` (from the directory that holds `isfs.exe` and
 `winfsp-x64.dll`):
 
 ```cmd
 "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" -g -G -o isfs.exe -p 127.0.0.1:18080 -ns USER -user tester -pass secret -m X:
 ```
 
-При остановке на ошибке:
+When it stops on an error:
 
 ```text
 kb
@@ -65,6 +65,6 @@ kb
 !heap -p -a <address>
 ```
 
-`kb` показывает стек, `!analyze -v` — сводку падения, `!heap -p -a` — состояние
-блока (имеет смысл при включённом PageHeap). При необходимости добавить каталог
-Debugging Tools в `PATH` или вызывать `cdb.exe` по полному пути.
+`kb` shows the stack, `!analyze -v` the crash summary and `!heap -p -a` the state of
+the block (it is meaningful with PageHeap enabled). If needed, add the Debugging Tools
+directory to `PATH` or call `cdb.exe` by its full path.
