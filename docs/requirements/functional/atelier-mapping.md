@@ -8,9 +8,9 @@ the path model — the volume root, the category directories, the package levels
 the decomposition of a document name and the resolution of a path. What the
 file system callbacks do with a resolved path is in `filesystem-operations.md`;
 the mount lifecycle is in `mount-lifecycle.md`; the transport and the
-credentials are in `connection-auth.md`; the caches are covered by the planned
-`caching.md`; the error mapping and the log formats are covered by the planned
-`errors-diagnostics.md`.
+credentials are in `connection-auth.md`; the caches are covered by
+[`caching.md`](caching.md); the error mapping and the log formats are covered by
+the planned `errors-diagnostics.md`.
 
 Source sections of [`docs/architecture/overview.md`](../../architecture/overview.md):
 §3 (volume and path model), §3.1 (name decomposition), §4.2 (operations),

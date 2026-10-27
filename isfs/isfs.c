@@ -27,6 +27,7 @@
 
 #include <winfsp/winfsp.h>
 #include <strsafe.h>
+#include <stdarg.h>
 #include <wctype.h>
 #include <sddl.h>
 #include <stdlib.h>
@@ -61,6 +62,11 @@
 
 /* the Atelier client of the mount is declared in atelier.h (REQ-CONN-021) */
 
+/* the derived structure of a category: the package levels and the documents
+ * built once per refresh (REQ-CACHE-004); defined with PTFS_DIR_ENTRY
+ */
+typedef struct PTFS_PACKAGE_INDEX PTFS_PACKAGE_INDEX;
+
 /* a document descriptor of a category listing (api.md §9.2) */
 typedef struct
 {
@@ -79,6 +85,7 @@ typedef struct
     ULONGLONG Expires; /* GetTickCount64 milliseconds */
     PTFS_DESCRIPTOR* Descriptors;
     ULONG Count;
+    PTFS_PACKAGE_INDEX* Index; /* the derived structure of Descriptors (REQ-CACHE-004) */
 } PTFS_CATEGORY_CACHE;
 
 typedef struct
@@ -264,6 +271,26 @@ static PWSTR Utf8ToWide(const char* Utf8)
     return Wide;
 }
 
+/* writes one line to the WinFsp debug log; the format is wide, the line is
+ * UTF-8, and the line is dropped when no debug log is open (REQ-CACHE-004,
+ * REQ-CACHE-009)
+ */
+static VOID DebugLog(PCWSTR Format, ...)
+{
+    WCHAR Text[1024];
+    char Utf8[4096];
+    va_list Args;
+    int Length;
+
+    va_start(Args, Format);
+    StringCchVPrintfW(Text, ARRAYSIZE(Text), Format, Args);
+    va_end(Args);
+
+    Length = WideCharToMultiByte(CP_UTF8, 0, Text, -1, Utf8, (int)sizeof Utf8, 0, 0);
+    if (Length > 0)
+        FspDebugLog("%s\n", Utf8);
+}
+
 /* parses the answer of the server; the whole text must hold one JSON value,
  * trailing whitespace is allowed
  */
@@ -311,44 +338,6 @@ static VOID FreeDescriptors(PTFS_DESCRIPTOR* Descriptors, ULONG Count)
     }
 
     free(Descriptors);
-}
-
-static NTSTATUS CopyDescriptors(const PTFS_DESCRIPTOR* Descriptors, ULONG Count,
-    PTFS_DESCRIPTOR** PDescriptors, ULONG* PCount)
-{
-    PTFS_DESCRIPTOR* Copy;
-    ULONG Index;
-
-    *PDescriptors = 0;
-    *PCount = 0;
-
-    Copy = malloc((Count ? Count : 1) * sizeof *Copy);
-    if (0 == Copy)
-        return STATUS_INSUFFICIENT_RESOURCES;
-    memset(Copy, 0, (Count ? Count : 1) * sizeof *Copy);
-
-    for (Index = 0; Index < Count; Index++)
-    {
-        Copy[Index].Name = DupString(Descriptors[Index].Name);
-        Copy[Index].Category = DupString(Descriptors[Index].Category);
-        Copy[Index].Db = DupString(Descriptors[Index].Db);
-        Copy[Index].Ts = DupString(Descriptors[Index].Ts);
-        Copy[Index].Generated = Descriptors[Index].Generated;
-
-        if ((0 != Descriptors[Index].Name && 0 == Copy[Index].Name) ||
-            (0 != Descriptors[Index].Category && 0 == Copy[Index].Category) ||
-            (0 != Descriptors[Index].Db && 0 == Copy[Index].Db) ||
-            (0 != Descriptors[Index].Ts && 0 == Copy[Index].Ts))
-        {
-            FreeDescriptors(Copy, Index);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-    }
-
-    *PDescriptors = Copy;
-    *PCount = Count;
-
-    return STATUS_SUCCESS;
 }
 
 /* reads the document descriptors of a category from the answer of the server
@@ -435,23 +424,86 @@ static NTSTATUS ParseCategoryListing(PBYTE Response, DWORD ResponseLength, PCWST
     return STATUS_SUCCESS;
 }
 
-/* the descriptors of a category, from the cache when the cache is valid
- * (overview §8, REQ-FS-001)
+/* the derived structure of a category, built with its descriptors
+ * (REQ-CACHE-004); defined with PTFS_DIR_ENTRY
  */
-static NTSTATUS GetCategoryDescriptors(PTFS* Ptfs, PCWSTR Category,
-    PTFS_DESCRIPTOR** PDescriptors, ULONG* PCount)
+static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
+    const PTFS_DESCRIPTOR* Descriptors, ULONG DescriptorCount,
+    PTFS_PACKAGE_INDEX** PIndex);
+static VOID FreePackageIndex(PTFS_PACKAGE_INDEX* Index);
+
+/* refreshes the cache entry of a category; the lock of the entry must be held.
+ * The descriptors and the derived index are replaced together, so that a
+ * failed refresh leaves the previous entry intact (overview §8,
+ * REQ-CACHE-008)
+ */
+static NTSTATUS RefreshCategoryCache(PTFS* Ptfs, PTFS_CATEGORY_CACHE* Cache, PCWSTR Category)
 {
-    PTFS_CATEGORY_CACHE* Cache;
     WCHAR Path[64];
     PBYTE Response = 0;
     DWORD ResponseLength = 0, StatusCode = 0;
     PTFS_DESCRIPTOR* Descriptors = 0;
     ULONG Count = 0;
+    PTFS_PACKAGE_INDEX* Index = 0;
+    NTSTATUS Result;
+
+    if (Cache->Valid && GetTickCount64() < Cache->Expires)
+        return STATUS_SUCCESS;
+
+    if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"/docnames/%s", Category)))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    Result = AtelierRequest(&Ptfs->Client, Ptfs->UserName, Ptfs->Password, L"GET", Path,
+        &Response, &ResponseLength, &StatusCode);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    if (StatusCode < 200 || StatusCode >= 300)
+    {
+        fail(L"cannot list the documents of %s: the server answered HTTP %lu",
+            Category, StatusCode);
+        free(Response);
+        return AtelierStatusToNtStatus(StatusCode);
+    }
+
+    Result = ParseCategoryListing(Response, ResponseLength, Category, &Descriptors, &Count);
+    free(Response);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    Result = BuildPackageIndex(Ptfs, Category, Descriptors, Count, &Index);
+    if (!NT_SUCCESS(Result))
+    {
+        FreeDescriptors(Descriptors, Count);
+        return Result;
+    }
+
+    info(L"listed %lu document(s) of %s", Count, Category);
+    DebugLog(L"cache: built the index of %s from %lu descriptor(s)", Category, Count);
+
+    FreeDescriptors(Cache->Descriptors, Cache->Count);
+    FreePackageIndex(Cache->Index);
+    Cache->Descriptors = Descriptors;
+    Cache->Count = Count;
+    Cache->Index = Index;
+    Cache->Valid = TRUE;
+    Cache->Expires = GetTickCount64() + DESCRIPTOR_CACHE_TTL_MS;
+
+    return STATUS_SUCCESS;
+}
+
+/* locks the cache entry of a category and makes sure that it is current; one
+ * enumeration of a category at a time, so that a listing is not requested
+ * twice for the same category (overview §9). The caller must release the entry
+ * with ReleaseCategory.
+ */
+static NTSTATUS AcquireCategory(PTFS* Ptfs, PCWSTR Category, PTFS_CATEGORY_CACHE** PCache)
+{
+    PTFS_CATEGORY_CACHE* Cache;
     NTSTATUS Result;
     int Index;
 
-    *PDescriptors = 0;
-    *PCount = 0;
+    *PCache = 0;
 
     Index = CategoryIndex(Category);
     if (Index < 0)
@@ -459,62 +511,23 @@ static NTSTATUS GetCategoryDescriptors(PTFS* Ptfs, PCWSTR Category,
 
     Cache = &Ptfs->Cache[Index];
 
-    /* one enumeration of a category at a time, so that a listing is not
-     * requested twice for the same category (overview §9)
-     */
     EnterCriticalSection(&Cache->Lock);
 
-    if (Cache->Valid && GetTickCount64() < Cache->Expires)
-    {
-        Result = CopyDescriptors(Cache->Descriptors, Cache->Count, PDescriptors, PCount);
-        LeaveCriticalSection(&Cache->Lock);
-        return Result;
-    }
-
-    if (FAILED(StringCchPrintfW(Path, ARRAYSIZE(Path), L"/docnames/%s", Categories[Index])))
-    {
-        LeaveCriticalSection(&Cache->Lock);
-        return STATUS_OBJECT_NAME_INVALID;
-    }
-
-    Result = AtelierRequest(&Ptfs->Client, Ptfs->UserName, Ptfs->Password, L"GET", Path,
-        &Response, &ResponseLength, &StatusCode);
+    Result = RefreshCategoryCache(Ptfs, Cache, Category);
     if (!NT_SUCCESS(Result))
     {
         LeaveCriticalSection(&Cache->Lock);
         return Result;
     }
 
-    if (StatusCode < 200 || StatusCode >= 300)
-    {
-        fail(L"cannot list the documents of %s: the server answered HTTP %lu",
-            Categories[Index], StatusCode);
-        free(Response);
-        LeaveCriticalSection(&Cache->Lock);
-        return AtelierStatusToNtStatus(StatusCode);
-    }
+    *PCache = Cache;
 
-    Result = ParseCategoryListing(Response, ResponseLength, Categories[Index], &Descriptors, &Count);
-    free(Response);
-    if (!NT_SUCCESS(Result))
-    {
-        LeaveCriticalSection(&Cache->Lock);
-        return Result;
-    }
+    return STATUS_SUCCESS;
+}
 
-    info(L"listed %lu document(s) of %s", Count, Categories[Index]);
-
-    FreeDescriptors(Cache->Descriptors, Cache->Count);
-    Cache->Descriptors = Descriptors;
-    Cache->Count = Count;
-    Cache->Valid = TRUE;
-    Cache->Expires = GetTickCount64() + DESCRIPTOR_CACHE_TTL_MS;
-
-    Result = CopyDescriptors(Cache->Descriptors, Cache->Count, PDescriptors, PCount);
-
+static VOID ReleaseCategory(PTFS_CATEGORY_CACHE* Cache)
+{
     LeaveCriticalSection(&Cache->Lock);
-
-    return Result;
 }
 
 /* ------------------------------------------------------------------------
@@ -1552,45 +1565,139 @@ static NTSTATUS AddDirEntry(PTFS_DIR_ENTRY** PEntries, ULONG* PCount, ULONG* PCa
     return STATUS_SUCCESS;
 }
 
-/* the entries of a category directory or of a package level; a package level
- * is served from the listing of its category, filtered by the prefix
- * (REQ-FS-001, REQ-MAP-008)
- */
-static NTSTATUS BuildCategoryEntries(PTFS* Ptfs, PCWSTR Category, PCWSTR Prefix,
-    PTFS_DIR_ENTRY** PEntries, ULONG* PCount)
+/* ------------------------------------------------------------------------
+ * The derived structure of a category (REQ-CACHE-004)
+ *
+ * The package levels and the documents of a category are derived from the
+ * names of its descriptors once per refresh and kept next to them. A
+ * listing or a path resolution then reads the entries of one package level
+ * instead of walking the whole listing.
+ * ------------------------------------------------------------------------ */
+
+typedef struct
 {
-    PTFS_DESCRIPTOR* Descriptors = 0;
-    ULONG DescriptorCount = 0, Index;
-    PWSTR* PrefixSegments = 0;
-    ULONG PrefixCount = 0;
+    PWSTR Prefix; /* the canonical dotted path of the level, "" for the category */
+    PTFS_DIR_ENTRY* Entries;
+    ULONG Count;
+    ULONG Capacity;
+} PTFS_PACKAGE_ENTRIES;
+
+struct PTFS_PACKAGE_INDEX
+{
+    PTFS_PACKAGE_ENTRIES* Packages;
+    ULONG Count;
+    ULONG Capacity;
+};
+
+static VOID FreePackageIndex(PTFS_PACKAGE_INDEX* Index)
+{
+    ULONG PackageIndex;
+
+    if (0 == Index)
+        return;
+
+    for (PackageIndex = 0; PackageIndex < Index->Count; PackageIndex++)
+    {
+        free(Index->Packages[PackageIndex].Prefix);
+        FreeDirEntries(Index->Packages[PackageIndex].Entries,
+            Index->Packages[PackageIndex].Count);
+    }
+
+    free(Index->Packages);
+    free(Index);
+}
+
+/* finds the entries of one package level; the comparison is case-insensitive
+ * (REQ-MAP-009)
+ */
+static const PTFS_PACKAGE_ENTRIES* FindPackageEntries(const PTFS_PACKAGE_INDEX* Index,
+    PCWSTR Prefix)
+{
+    ULONG PackageIndex;
+
+    if (0 == Prefix)
+        Prefix = L"";
+
+    for (PackageIndex = 0; PackageIndex < Index->Count; PackageIndex++)
+        if (EqualsNameIgnoreCase(Index->Packages[PackageIndex].Prefix, Prefix))
+            return &Index->Packages[PackageIndex];
+
+    return 0;
+}
+
+/* the entry of one package level, created on demand */
+static NTSTATUS GetOrAddPackage(PTFS_PACKAGE_INDEX* Index, PCWSTR Prefix,
+    PTFS_PACKAGE_ENTRIES** PPackage)
+{
+    PTFS_PACKAGE_ENTRIES* Package;
+    ULONG PackageIndex;
+
+    for (PackageIndex = 0; PackageIndex < Index->Count; PackageIndex++)
+        if (EqualsNameIgnoreCase(Index->Packages[PackageIndex].Prefix, Prefix))
+        {
+            *PPackage = &Index->Packages[PackageIndex];
+            return STATUS_SUCCESS;
+        }
+
+    if (Index->Count == Index->Capacity)
+    {
+        ULONG Capacity = Index->Capacity ? Index->Capacity * 2 : 8;
+        PTFS_PACKAGE_ENTRIES* Packages = realloc(Index->Packages, Capacity * sizeof *Packages);
+
+        if (0 == Packages)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        memset(Packages + Index->Count, 0, (Capacity - Index->Count) * sizeof *Packages);
+        Index->Packages = Packages;
+        Index->Capacity = Capacity;
+    }
+
+    Package = &Index->Packages[Index->Count];
+    memset(Package, 0, sizeof *Package);
+    Package->Prefix = DupString(Prefix);
+    if (0 == Package->Prefix)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Index->Count++;
+    *PPackage = Package;
+
+    return STATUS_SUCCESS;
+}
+
+/* derives the package levels and the documents of a category from its
+ * descriptors; the index is built once per refresh and kept with the
+ * descriptors (REQ-CACHE-004)
+ */
+static NTSTATUS BuildPackageIndex(PTFS* Ptfs, PCWSTR Category,
+    const PTFS_DESCRIPTOR* Descriptors, ULONG DescriptorCount,
+    PTFS_PACKAGE_INDEX** PIndex)
+{
+    PTFS_PACKAGE_INDEX* Index;
     PWSTR* Accepted = 0;
     ULONG AcceptedCount = 0, AcceptedCapacity = 0;
-    PWSTR CanonicalPrefix = 0;
-    PTFS_DIR_ENTRY* Entries = 0;
-    ULONG EntryCount = 0, EntryCapacity = 0;
-    NTSTATUS Result;
+    ULONG DescriptorIndex, SegmentIndex, PackageIndex, EntryIndex;
+    NTSTATUS Result = STATUS_SUCCESS;
 
-    *PEntries = 0;
-    *PCount = 0;
+    *PIndex = 0;
 
-    if (0 != Prefix && L'\0' != *Prefix)
-        PrefixCount = SplitByDelimiter(Prefix, L'.', 0, &PrefixSegments);
+    Index = malloc(sizeof *Index);
+    if (0 == Index)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    memset(Index, 0, sizeof *Index);
 
-    Result = GetCategoryDescriptors(Ptfs, Category, &Descriptors, &DescriptorCount);
-    if (!NT_SUCCESS(Result))
-        goto exit;
-
-    for (Index = 0; Index < DescriptorCount; Index++)
+    for (DescriptorIndex = 0; DescriptorIndex < DescriptorCount; DescriptorIndex++)
     {
-        PTFS_DESCRIPTOR* Descriptor = &Descriptors[Index];
+        const PTFS_DESCRIPTOR* Descriptor = &Descriptors[DescriptorIndex];
         PWSTR* Segments = 0;
-        ULONG SegmentCount, SegmentIndex;
-        ULONG PackageCount;
-        BOOLEAN Skip = FALSE, Match = TRUE;
+        ULONG SegmentCount, PackageCount, Level;
+        BOOLEAN Skip = FALSE;
         UINT64 Timestamp = 0;
+        WCHAR Prefix[2048];
 
-        /* the generated documents are not exposed (REQ-FS-002, REQ-MAP-011) */
-        if (Descriptor->Generated)
+        /* the generated documents are not exposed (REQ-MAP-011); a descriptor
+         * without a name cannot be exposed either
+         */
+        if (0 == Descriptor->Name || Descriptor->Generated)
             continue;
 
         /* two documents that differ only by case: the first one is exposed
@@ -1629,7 +1736,6 @@ static NTSTATUS BuildCategoryEntries(PTFS* Ptfs, PCWSTR Category, PCWSTR Prefix,
 
         /* every segment must be a legal name of a path segment (REQ-MAP-013) */
         for (SegmentIndex = 0; SegmentIndex < SegmentCount; SegmentIndex++)
-        {
             if (!IsLegalPathSegment(Segments[SegmentIndex]))
             {
                 warn(L"%s: the document %s is not exposed, because %s is not a legal file name",
@@ -1637,111 +1743,167 @@ static NTSTATUS BuildCategoryEntries(PTFS* Ptfs, PCWSTR Category, PCWSTR Prefix,
                 Skip = TRUE;
                 break;
             }
-        }
         if (Skip)
         {
             FreeSegments(Segments, SegmentCount);
             continue;
         }
 
-        /* the package levels of the document are the segments in front of the
-         * file name (REQ-MAP-004)
+        ParseTimestamp(Descriptor->Ts, &Timestamp);
+
+        /* the last segment is the file, the segments in front of it are the
+         * package levels (REQ-MAP-004)
          */
         PackageCount = SegmentCount - 1;
+        Prefix[0] = L'\0';
 
-        if (PackageCount < PrefixCount)
-            Match = FALSE;
-        for (SegmentIndex = 0; Match && SegmentIndex < PrefixCount; SegmentIndex++)
-            if (!EqualsNameIgnoreCase(Segments[SegmentIndex], PrefixSegments[SegmentIndex]))
-                Match = FALSE;
-
-        if (Match)
+        for (Level = 0; Level <= PackageCount; Level++)
         {
-            ParseTimestamp(Descriptor->Ts, &Timestamp);
+            PTFS_PACKAGE_ENTRIES* Package = 0;
 
-            /* the canonical spelling of the package path is the one of the
-             * server, not the one of the request (REQ-FS-004); it is taken
-             * from the first document that matches the prefix
-             */
-            if (0 == CanonicalPrefix)
-            {
-                CanonicalPrefix = JoinDotted(Segments, PrefixCount);
-                if (0 == CanonicalPrefix)
-                {
-                    Result = STATUS_INSUFFICIENT_RESOURCES;
-                    FreeSegments(Segments, SegmentCount);
-                    goto exit;
-                }
-            }
+            Result = GetOrAddPackage(Index, Prefix, &Package);
+            if (!NT_SUCCESS(Result))
+                break;
 
-            if (PackageCount == PrefixCount)
+            if (Level == PackageCount)
             {
                 /* the document itself */
-                Result = AddDirEntry(&Entries, &EntryCount, &EntryCapacity,
-                    Segments[SegmentCount - 1], FALSE, Descriptor->Name, 0, Timestamp);
+                Result = AddDirEntry(&Package->Entries, &Package->Count, &Package->Capacity,
+                    Segments[Level], FALSE, Descriptor->Name, 0, Timestamp);
             }
             else
             {
                 /* the next package level */
                 WCHAR PathName[2048];
 
-                if (0 == PrefixCount)
-                {
-                    if (FAILED(StringCchCopyW(PathName, ARRAYSIZE(PathName), Segments[PrefixCount])))
-                    {
-                        Result = STATUS_OBJECT_NAME_INVALID;
-                        FreeSegments(Segments, SegmentCount);
-                        goto exit;
-                    }
-                }
+                if (L'\0' == Prefix[0])
+                    Result = FAILED(StringCchCopyW(PathName, ARRAYSIZE(PathName),
+                        Segments[Level])) ? STATUS_OBJECT_NAME_INVALID : STATUS_SUCCESS;
                 else
-                {
-                    if (FAILED(StringCchPrintfW(PathName, ARRAYSIZE(PathName), L"%s.%s",
-                        CanonicalPrefix, Segments[PrefixCount])))
-                    {
-                        Result = STATUS_OBJECT_NAME_INVALID;
-                        FreeSegments(Segments, SegmentCount);
-                        goto exit;
-                    }
-                }
+                    Result = FAILED(StringCchPrintfW(PathName, ARRAYSIZE(PathName), L"%s.%s",
+                        Prefix, Segments[Level])) ? STATUS_OBJECT_NAME_INVALID : STATUS_SUCCESS;
 
-                Result = AddDirEntry(&Entries, &EntryCount, &EntryCapacity,
-                    Segments[PrefixCount], TRUE, 0, PathName, Timestamp);
+                if (NT_SUCCESS(Result))
+                    Result = AddDirEntry(&Package->Entries, &Package->Count,
+                        &Package->Capacity, Segments[Level], TRUE, 0, PathName, Timestamp);
+
+                /* the prefix of the next level, canonical for this document */
+                if (NT_SUCCESS(Result) && L'\0' != Prefix[0] &&
+                    FAILED(StringCchCatW(Prefix, ARRAYSIZE(Prefix), L".")))
+                    Result = STATUS_OBJECT_NAME_INVALID;
+                if (NT_SUCCESS(Result) &&
+                    FAILED(StringCchCatW(Prefix, ARRAYSIZE(Prefix), Segments[Level])))
+                    Result = STATUS_OBJECT_NAME_INVALID;
             }
 
             if (!NT_SUCCESS(Result))
-            {
-                FreeSegments(Segments, SegmentCount);
-                goto exit;
-            }
+                break;
         }
 
         FreeSegments(Segments, SegmentCount);
+
+        if (!NT_SUCCESS(Result))
+            goto exit;
     }
 
     /* the index number of an entry is derived from its name (REQ-FS-012) */
-    for (Index = 0; Index < EntryCount; Index++)
+    for (PackageIndex = 0; PackageIndex < Index->Count; PackageIndex++)
     {
-        if (Entries[Index].IsDirectory)
-            Entries[Index].IndexNumber = HashEntryName(Ptfs->Namespace, Entries[Index].PathName);
-        else
-            Entries[Index].IndexNumber = HashEntryName(Ptfs->Namespace, Entries[Index].DocumentName);
+        PTFS_PACKAGE_ENTRIES* Package = &Index->Packages[PackageIndex];
+
+        for (EntryIndex = 0; EntryIndex < Package->Count; EntryIndex++)
+        {
+            PTFS_DIR_ENTRY* Entry = &Package->Entries[EntryIndex];
+
+            Entry->IndexNumber = HashEntryName(Ptfs->Namespace,
+                Entry->IsDirectory ? Entry->PathName : Entry->DocumentName);
+        }
     }
 
-    *PEntries = Entries;
-    *PCount = EntryCount;
-    Entries = 0;
-    EntryCount = 0;
+    *PIndex = Index;
+    Index = 0;
 
 exit:
-    FreeDirEntries(Entries, EntryCount);
-    FreeDescriptors(Descriptors, DescriptorCount);
     if (0 != Accepted)
         free(Accepted);
-    if (0 != PrefixSegments)
-        FreeSegments(PrefixSegments, PrefixCount);
-    if (0 != CanonicalPrefix)
-        free(CanonicalPrefix);
+    FreePackageIndex(Index);
+
+    return Result;
+}
+
+/* a copy of one package level; the caller owns the entries and frees them
+ * with FreeDirEntries
+ */
+static NTSTATUS CopyDirEntries(const PTFS_DIR_ENTRY* Entries, ULONG Count,
+    PTFS_DIR_ENTRY** PCopy, ULONG* PCount)
+{
+    PTFS_DIR_ENTRY* Copy;
+    ULONG EntryIndex;
+
+    *PCopy = 0;
+    *PCount = 0;
+
+    Copy = malloc((Count ? Count : 1) * sizeof *Copy);
+    if (0 == Copy)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    memset(Copy, 0, (Count ? Count : 1) * sizeof *Copy);
+
+    for (EntryIndex = 0; EntryIndex < Count; EntryIndex++)
+    {
+        Copy[EntryIndex].Name = DupString(Entries[EntryIndex].Name);
+        Copy[EntryIndex].DocumentName = DupString(Entries[EntryIndex].DocumentName);
+        Copy[EntryIndex].PathName = DupString(Entries[EntryIndex].PathName);
+        Copy[EntryIndex].IsDirectory = Entries[EntryIndex].IsDirectory;
+        Copy[EntryIndex].Timestamp = Entries[EntryIndex].Timestamp;
+        Copy[EntryIndex].IndexNumber = Entries[EntryIndex].IndexNumber;
+
+        if (0 == Copy[EntryIndex].Name ||
+            (0 != Entries[EntryIndex].DocumentName && 0 == Copy[EntryIndex].DocumentName) ||
+            (0 != Entries[EntryIndex].PathName && 0 == Copy[EntryIndex].PathName))
+        {
+            FreeDirEntries(Copy, EntryIndex + 1);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    *PCopy = Copy;
+    *PCount = Count;
+
+    return STATUS_SUCCESS;
+}
+
+/* the entries of a category directory or of a package level; they are read
+ * from the derived structure of the category, so an enumeration costs no
+ * request while the cache entry is valid (REQ-FS-001, REQ-MAP-008,
+ * REQ-CACHE-002, REQ-CACHE-004)
+ */
+static NTSTATUS BuildCategoryEntries(PTFS* Ptfs, PCWSTR Category, PCWSTR Prefix,
+    PTFS_DIR_ENTRY** PEntries, ULONG* PCount)
+{
+    PTFS_CATEGORY_CACHE* Cache;
+    const PTFS_PACKAGE_ENTRIES* Package;
+    ULONG EntryCount = 0;
+    NTSTATUS Result;
+
+    *PEntries = 0;
+    *PCount = 0;
+
+    Result = AcquireCategory(Ptfs, Category, &Cache);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    Package = FindPackageEntries(Cache->Index, Prefix);
+    if (0 != Package)
+    {
+        EntryCount = Package->Count;
+        Result = CopyDirEntries(Package->Entries, Package->Count, PEntries, PCount);
+    }
+
+    DebugLog(L"cache: reused the index of %s for the package \"%s\" (%lu entr%s)",
+        Category, (0 != Prefix) ? Prefix : L"", EntryCount,
+        1 == EntryCount ? L"y" : L"ies");
+
+    ReleaseCategory(Cache);
 
     return Result;
 }
@@ -1775,90 +1937,75 @@ static VOID VolumePathFree(VOLUME_PATH* Path)
     memset(Path, 0, sizeof *Path);
 }
 
-/* resolves a path below a category against the listing of the category
- * (REQ-MAP-015)
+/* resolves a path below a category against the derived structure of the
+ * category (REQ-MAP-015, REQ-CACHE-004)
  */
 static NTSTATUS ResolveCategoryPath(PTFS* Ptfs, PCWSTR Category, PWSTR* Segments, ULONG Count,
     VOLUME_PATH* Path)
 {
-    PTFS_DESCRIPTOR* Descriptors = 0;
-    ULONG DescriptorCount = 0, Index;
+    PTFS_CATEGORY_CACHE* Cache;
+    const PTFS_PACKAGE_ENTRIES* Package;
+    ULONG Level;
     NTSTATUS Result;
 
-    Result = GetCategoryDescriptors(Ptfs, Category, &Descriptors, &DescriptorCount);
+    Result = AcquireCategory(Ptfs, Category, &Cache);
     if (!NT_SUCCESS(Result))
         return Result;
 
-    for (Index = 0; Index < DescriptorCount; Index++)
+    Package = FindPackageEntries(Cache->Index, L"");
+
+    for (Level = 0; Level < Count && 0 != Package; Level++)
     {
-        PWSTR* DocumentSegments = 0;
-        ULONG DocumentSegmentCount, SegmentIndex;
-        ULONG PackageCount;
-        BOOLEAN Match = TRUE;
+        const PTFS_DIR_ENTRY* Entry = 0;
+        ULONG EntryIndex;
 
-        if (Descriptors[Index].Generated)
-            continue;
-
-        DocumentSegmentCount = SplitDocumentName(Descriptors[Index].Name, &DocumentSegments);
-        if (0 == DocumentSegmentCount)
-            continue;
-
-        /* a document whose name cannot be represented is not exposed and
-         * resolves to nothing (REQ-MAP-013)
-         */
-        for (SegmentIndex = 0; SegmentIndex < DocumentSegmentCount; SegmentIndex++)
-            if (!IsLegalPathSegment(DocumentSegments[SegmentIndex]))
+        for (EntryIndex = 0; EntryIndex < Package->Count; EntryIndex++)
+            if (EqualsNameIgnoreCase(Package->Entries[EntryIndex].Name, Segments[Level]))
+            {
+                Entry = &Package->Entries[EntryIndex];
                 break;
-        if (SegmentIndex < DocumentSegmentCount)
-        {
-            FreeSegments(DocumentSegments, DocumentSegmentCount);
-            continue;
-        }
+            }
 
-        PackageCount = DocumentSegmentCount - 1;
+        /* the segment is neither a package level nor a document */
+        if (0 == Entry)
+            break;
 
-        /* the path is a package level, when a document of the category has it
-         * as the beginning of its package path (REQ-MAP-007)
-         */
-        if (PackageCount >= Count)
+        if (Level + 1 == Count)
         {
-            for (SegmentIndex = 0; SegmentIndex < Count; SegmentIndex++)
-                if (!EqualsNameIgnoreCase(DocumentSegments[SegmentIndex], Segments[SegmentIndex]))
-                {
-                    Match = FALSE;
-                    break;
-                }
-            if (Match)
+            if (Entry->IsDirectory)
             {
                 Path->Kind = VOLUME_PATH_PACKAGE;
                 /* the canonical spelling of the level is the one of the
                  * server, not the one of the request (REQ-FS-004)
                  */
-                Path->PackagePrefix = JoinDotted(DocumentSegments, Count);
-                FreeSegments(DocumentSegments, DocumentSegmentCount);
-                FreeDescriptors(Descriptors, DescriptorCount);
-                return STATUS_SUCCESS;
+                Path->PackagePrefix = DupString(Entry->PathName);
+                Result = (0 != Path->PackagePrefix) ?
+                    STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
             }
+            else
+            {
+                Path->Kind = VOLUME_PATH_DOCUMENT;
+                Path->DocumentName = DupString(Entry->DocumentName);
+                Result = (0 != Path->DocumentName) ?
+                    STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            if (!NT_SUCCESS(Result))
+                Path->Kind = VOLUME_PATH_INVALID;
+
+            ReleaseCategory(Cache);
+
+            return Result;
         }
 
-        /* the path is a document */
-        Match = (PackageCount == Count - 1);
-        for (SegmentIndex = 0; Match && SegmentIndex + 1 < Count; SegmentIndex++)
-            if (!EqualsNameIgnoreCase(DocumentSegments[SegmentIndex], Segments[SegmentIndex]))
-                Match = FALSE;
-        if (Match && EqualsNameIgnoreCase(DocumentSegments[DocumentSegmentCount - 1], Segments[Count - 1]))
-        {
-            Path->Kind = VOLUME_PATH_DOCUMENT;
-            Path->DocumentName = DupString(Descriptors[Index].Name);
-            FreeSegments(DocumentSegments, DocumentSegmentCount);
-            FreeDescriptors(Descriptors, DescriptorCount);
-            return STATUS_SUCCESS;
-        }
+        /* a document has no entries below it */
+        if (!Entry->IsDirectory)
+            break;
 
-        FreeSegments(DocumentSegments, DocumentSegmentCount);
+        Package = FindPackageEntries(Cache->Index, Entry->PathName);
     }
 
-    FreeDescriptors(Descriptors, DescriptorCount);
+    ReleaseCategory(Cache);
 
     Path->Kind = VOLUME_PATH_INVALID;
 
@@ -3473,6 +3620,7 @@ static VOID PtfsDelete(PTFS* Ptfs)
     {
         DeleteCriticalSection(&Ptfs->Cache[Index].Lock);
         FreeDescriptors(Ptfs->Cache[Index].Descriptors, Ptfs->Cache[Index].Count);
+        FreePackageIndex(Ptfs->Cache[Index].Index);
     }
 
     AtelierClientClose(&Ptfs->Client);

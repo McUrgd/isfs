@@ -20,7 +20,6 @@
  */
 
 #include <windows.h>
-#include <strsafe.h>
 #include <wctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -170,29 +169,6 @@ ULONG SplitDocumentName(PCWSTR Name, PWSTR** PSegments)
     *PSegments = Segments;
 
     return Count;
-}
-
-PWSTR JoinDotted(PWSTR* Segments, ULONG Count)
-{
-    SIZE_T Length = 1, Index;
-    PWSTR Text;
-
-    for (Index = 0; Index < Count; Index++)
-        Length += wcslen(Segments[Index]) + 1;
-
-    Text = malloc(Length * sizeof(WCHAR));
-    if (0 == Text)
-        return 0;
-
-    Text[0] = L'\0';
-    for (Index = 0; Index < Count; Index++)
-    {
-        if (Index > 0)
-            wcscat_s(Text, Length, L".");
-        wcscat_s(Text, Length, Segments[Index]);
-    }
-
-    return Text;
 }
 
 BOOL IsLegalPathSegment(PCWSTR Segment)

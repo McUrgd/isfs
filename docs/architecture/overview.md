@@ -44,10 +44,10 @@ ISFS core
   ├─ FS adapter          WinFsp callbacks ↔ internal file system model
   ├─ Path resolver       Windows path ↔ (category, document)
   ├─ Document codec      text line array / base64 ↔ bytes
-  ├─ Atelier client      HTTPS, JSON, auth, ETag/hash, retries
-  ├─ Caches              document descriptors, content
+  ├─ Atelier client      HTTP, JSON, Basic auth, ETag/hash
+  ├─ Caches              document descriptors and the derived package structure
   └─ Diagnostics         request log, error mapping
-        │  HTTPS  /api/atelier/v1/...
+        │  HTTP  /api/atelier/v1/...
         ▼
 InterSystems web gateway → Atelier v1 API
 ```
@@ -151,8 +151,8 @@ have no filesystem semantics and are not used.
 | Filesystem operation | WinFsp callback | Atelier sequence | Notes |
 |---|---|---|---|
 | Mount / volume info | `GetVolumeInfo` | `GET /:namespace` (probe of the `-ns` namespace) | no quota API; report a constant synthetic capacity (`TotalSize = FreeSize = 1 TiB`) and label `ISFS` |
-| Enumerate root | `ReadDirectory` | `GET /:namespace/docnames` | category directories derived from the document list; no namespace lookup |
-| Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors cached; sizes are 0 (REQ-FS-003); package levels are derived from the names of the listing (§3.1) |
+| Enumerate root | `ReadDirectory` | none | the root is the constant list of the category directories (REQ-MAP-002); no server resource |
+| Enumerate `<CAT>` | `ReadDirectory` | `GET /:namespace/docnames/:cat` | descriptors and the derived package structure are built once per refresh (REQ-CACHE-004); sizes are 0 (REQ-FS-003); package levels are derived from the names of the listing (§3.1) |
 | Stat (path) | `GetFileInfo`, `GetSecurityByName` | none | attributes and the full-access descriptor are synthesized; no stat metadata is collected, size is 0 until content is fetched |
 | Open existing | `Open` | `GET /:namespace/doc/<name>` | load content once per handle and keep its ETag; serve ranges from memory |
 | Read | `Read` | none | content is held by the open handle; Atelier has no range read, so the whole document was fetched at open |
@@ -166,8 +166,8 @@ have no filesystem semantics and are not used.
 | Set timestamps | `SetBasicInfo` | none | accepted and ignored; server `ts` is authoritative |
 | Set security | `SetSecurity` | none | unsupported; descriptor is synthesized read-only |
 | File locking | WinFsp sharing/lock callbacks | none | no Atelier lock API; server-side document locks surface as `423`/`425` |
-| Change notification | none | `POST /:namespace/modified/CLS` | used to invalidate caches, not to raise Windows notifications |
-| Batch read/prefetch | `ReadDirectory`/`Open` | `POST /:namespace/docs` | optional; bounded and disabled by default |
+| Change notification | none | `POST /:namespace/modified/CLS` | not used in v1: the lifetime of the descriptor cache is the only freshness mechanism (REQ-CACHE-007) |
+| Batch read/prefetch | `ReadDirectory`/`Open` | `POST /:namespace/docs` | not implemented in v1; deferred together with the content cache |
 | Compile/query/work/Ensemble | none | see endpoint table | control plane, out of scope for v1 |
 
 ### 4.3 Rename semantics
@@ -179,7 +179,7 @@ Atelier v1 has no rename or copy endpoint. Rename is composed:
    (§3.1), possibly in another category or another package — preserving `enc` and
    content.
 3. `DELETE` the source document.
-4. Update both source and target caches.
+4. Invalidate the cache entries of the source and of the target category.
 
 Consequences:
 
@@ -204,22 +204,23 @@ document. The implementation therefore:
 1. loads the current content when a file is opened for update (create-new starts empty);
 2. applies writes to an in-memory buffer;
 3. sends one `PUT` on `Flush`/`Cleanup` if the buffer is dirty;
-4. updates the cache from the `PUT` response (the server may return modified content, for
-   example after a source control hook).
+4. updates the handle from the `PUT` response (the server may return modified content, for
+   example after a source control hook) and invalidates the descriptor cache of the
+   document's category; a per-entry update is draft (`caching.md`, REQ-CACHE-005).
 
 `PUT` details:
 
-- `Content-Type: text/plain` is mandatory (otherwise the API returns `415`).
+- `Content-Type: application/json` is mandatory (the description says `text/plain`, but the
+  implementation requires JSON, see api.md §12).
 - The body is JSON: `{"enc": false, "content": ["line", ...]}` for text, or
-  `{"enc": true, "content": ["<base64 chunk>"]}` for binary.
-- The document hash/`ts` obtained at open is sent in the conditional header expected by
-  `%Atelier.REST` (ETag-style, normally `If-None-Match`); a mismatch produces `409`.
-  Verify the exact header name against the target server during implementation.
+  `{"enc": true, "content": ["<base64 chunk>"]}` for binary. The text lines are sent as
+  UTF-8 strings of the JSON array; the document text is never a raw body.
+- The document hash obtained at open is sent as `If-None-Match`; a mismatch produces `409`.
 - `?ignoreConflict=1` is only used when the user has explicitly chosen "overwrite server
-  version" in configuration; the default is to fail the write and keep the local buffer.
+  version" in configuration (`-overwrite`); the default is to fail the write and keep the
+  local buffer.
 - `201` means the document was created, `200` means it was updated.
-- Empty new files are valid for `OTH`; for `CLS`/`RTN` the server may reject invalid source
-  only at compile time, so creation succeeds and the file remains uncompiled.
+- An untouched new file is written as an empty document on cleanup (REQ-FS-019).
 
 ## 5. Document representation
 
@@ -248,8 +249,8 @@ Rules used by the filesystem:
 - `enc=true`: `content` is an array of base64 chunks. Chunks are concatenated and decoded to
   raw bytes. This is also forced by `?binary=1`.
 - On write, content that is valid UTF-8 without NUL bytes is treated as text; otherwise it
-  is sent as binary with a single base64 chunk. Extensions known to be binary can be
-  configured to always use binary mode.
+  is sent as binary with a single base64 chunk. There is no extension allow-list: the
+  decision is made from the bytes alone (REQ-FS-023).
 - CRLF written by Windows applications is normalized to LF for text documents, matching the
   line-array model. Existing lone `\r` characters are preserved as data.
 - `?storageOnly=1` is not used: the filesystem exposes complete documents.
@@ -275,7 +276,7 @@ of an open handle.
 | `LastAccessTime` | document `ts` |
 | `LastWriteTime` | document `ts` |
 | `ChangeTime` | document `ts` |
-| `IndexNumber` | stable hash (FNV-1a 64) of `namespace + "\0" + document name` (the dotted Atelier name of §3.1, not the path) |
+| `IndexNumber` | stable hash (FNV-1a 64) of `namespace + "\0" + name`, where the name is the dotted Atelier name of a document or the dotted path of a package level (§3.1) |
 | `HardLinks` | 0 |
 | `ReparseTag` | 0 |
 
@@ -302,7 +303,7 @@ The first determines the NTSTATUS value; the second is logged and may refine the
 | HTTP | NTSTATUS | Typical cause |
 |---|---|---|
 | `200`, `201` | `STATUS_SUCCESS` | success |
-| `304` | `STATUS_SUCCESS` | cached content is still current |
+| `304` | `STATUS_SUCCESS` | unused in v1: ISFS performs no conditional reads (REQ-FS-017 dropped) |
 | `400` | `STATUS_OBJECT_NAME_INVALID` | invalid document name or malformed request |
 | `401` | `STATUS_LOGON_FAILURE` (mount) / `STATUS_ACCESS_DENIED` (operation) | bad credentials or expired session |
 | `403` | `STATUS_ACCESS_DENIED` | namespace/document not writable |
@@ -328,7 +329,13 @@ All caches are in memory; the server is authoritative. The namespace is fixed pe
 there is no namespace cache.
 
 - **Document descriptor cache** — per category: entries from
-  `GetDocNames` (`name`, `cat`, `ts`, `db`, `gen`), TTL 30 s by default.
+  `GetDocNames` (`name`, `cat`, `ts`, `db`, `gen`) with a lifetime of 30 s
+  (`DESCRIPTOR_CACHE_TTL_MS`). The lifetime is a compile-time constant in v1; a
+  configuration option is draft (`caching.md`, REQ-CACHE-006).
+- **Derived package structure** — the package levels and the documents of every level,
+  derived from the descriptors once per refresh and kept with them (`caching.md`,
+  REQ-CACHE-004). An enumeration and a path resolution read one level of this structure
+  instead of walking the whole category listing.
 - **Content cache** — deferred for v1: ISFS keeps no shared content cache, because
   `Open` owns the content through its handle and `REQ-FS-017` (conditional `GET` and
   `304`) is dropped. A later version can add an LRU cache keyed by
@@ -336,17 +343,20 @@ there is no namespace cache.
 - **Dirty buffers** — per open handle, flushed on demand. Multiple handles to the same
   document can overwrite each other; the conditional `PUT` turns the loser into `409`
   rather than silent data loss.
-- **External change detection** — `POST /:namespace/modified/CLS` compares database hashes
-  and returns changed class names. It only supports `CLS`; for other categories the TTL is
-  used. Results invalidate descriptor entries.
+- **Freshness of the tree** — the lifetime above is the only mechanism: a change made by
+  another client becomes visible after the entry expires (`caching.md`, REQ-CACHE-007).
+  `POST /:namespace/modified/CLS` exists in the API but is not used in v1.
 
-Local mutations invalidate affected entries immediately: writes update the document cache
-from the `PUT` response; deletes remove the entry; renames remove both source and target
-entries.
+A local mutation invalidates the cache entry of the whole affected category: a save and a
+delete drop that category, a rename drops the source and the target category. Updating only
+the affected entries is draft (`caching.md`, REQ-CACHE-005). A refresh replaces the
+descriptors and the derived structure together; a failed refresh keeps the previous entry
+and reports the error (`caching.md`, REQ-CACHE-008).
 
 ## 9. Concurrency and locking
 
-- One mutex per document serializes flush, rename, delete and cache updates.
+- One lock per open handle serializes its content buffer; one lock per category serializes
+  the refresh and the access to the cached descriptors and the derived structure.
 - Directory enumeration is serialized per category to avoid duplicate `GetDocNames` calls;
   other callbacks may proceed in parallel.
 - Writes are write-through at close/flush, not write-behind on a timer.
@@ -366,8 +376,12 @@ entries.
 ## 10. Diagnostics
 
 - Never log document content or secrets.
-- Log cache decisions (hit/miss/304/invalidate) at debug level.
-- Expose the effective configuration (server URL, TTLs, cache limits) at startup.
+- Log the build and the reuse of the derived package structure at debug level, with the
+  category, the package prefix and the number of entries (REQ-CACHE-004). Hit/miss counters
+  and timings are draft (`caching.md`, REQ-CACHE-009).
+- Expose the effective configuration at startup: the base URL, the namespace and the
+  conflict policy. The cache lifetime and the cache limits are fixed in v1
+  (`caching.md`, REQ-CACHE-006, draft).
 - Keep the Atelier request/response correlation in one log scope per filesystem operation,
   so a WinFsp callback can be traced end to end.
 - Mount failures (`401`, DNS, TLS, timeout, wrong or inaccessible `-ns` namespace) must
@@ -445,7 +459,7 @@ tracked.
 | Mapping of paths to Atelier resources | §3, §4, §12 |
 | Connection and authentication | §2, §7, §10 |
 | Errors, diagnostics and logging | §7, §10 |
-| Caching and performance | §6, §8 |
+| Caching and performance | §4.2, §8, §9, §10 |
 
 The requirement files themselves are indexed in `docs/requirements/README.md`; every
 requirement carries a stable ID and its own status.
@@ -454,4 +468,5 @@ requirement carries a stable ID and its own status.
 
 - API reference for day-to-day work: `docs/architecture/api.md`
 - Requirements index: `docs/requirements/README.md`
+- Caching and performance requirements: `docs/requirements/functional/caching.md`
 - Project overview and build instructions: `README.md`

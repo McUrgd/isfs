@@ -16,9 +16,10 @@ retiring a requirement file.
 | Mapping of Atelier resources (packages, directories) to filesystem paths | [`functional/atelier-mapping.md`](functional/atelier-mapping.md) | implemented |
 | Connection and authentication (server, credentials, session handling) | [`functional/connection-auth.md`](functional/connection-auth.md) | implemented |
 | Errors, diagnostics and logging | `functional/errors-diagnostics.md` | planned |
-| Caching and performance behaviour | `functional/caching.md` | planned |
+| Caching and performance behaviour | [`functional/caching.md`](functional/caching.md) | draft |
 
 Files listed as *planned* are created together with their first requirement.
+A *draft* file exists and holds requirements that are not implemented yet.
 
 ## Requirement format
 

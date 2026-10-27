@@ -48,9 +48,6 @@ VOID FreeSegments(PWSTR* Segments, ULONG Count);
  */
 ULONG SplitDocumentName(PCWSTR Name, PWSTR** PSegments);
 
-/* joins the segments of a package path with dots (REQ-MAP-005) */
-PWSTR JoinDotted(PWSTR* Segments, ULONG Count);
-
 /* a segment that Windows would reject is not exposed (REQ-MAP-013) */
 BOOL IsLegalPathSegment(PCWSTR Segment);
 

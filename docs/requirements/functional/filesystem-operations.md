@@ -8,9 +8,9 @@ themselves — which Atelier call backs an operation, what a caller observes, ho
 content is encoded, and which operations are refused. The mapping of paths and
 names onto Atelier resources is in `atelier-mapping.md`; the mount lifecycle is in
 `mount-lifecycle.md`; the transport and the credentials are in
-`connection-auth.md`; the caches and the prefetch modes are covered by the
-planned `caching.md`; the canonical HTTP-to-NTSTATUS table and the log formats
-are covered by the planned `errors-diagnostics.md`.
+`connection-auth.md`; the caches and the prefetch modes are covered by
+[`caching.md`](caching.md); the canonical HTTP-to-NTSTATUS table and the log
+formats are covered by the planned `errors-diagnostics.md`.
 
 Source sections of [`docs/architecture/overview.md`](../../architecture/overview.md):
 §4 (operations), §5 (document representation), §6 (metadata synthesis),
@@ -63,7 +63,7 @@ Acceptance criteria:
 - The root listing is not part of this requirement: the contents of `\` are
   defined by REQ-MAP-001 and REQ-MAP-002.
 - The listing is served from the descriptor cache where the cache is valid; the
-  cache behaviour itself is not specified here; see the planned `caching.md`.
+  cache behaviour itself is not specified here; see [`caching.md`](caching.md).
 
 ### REQ-FS-002 — Generated documents are not listed
 
