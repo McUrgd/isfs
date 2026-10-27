@@ -1,6 +1,6 @@
 # Atelier mapping — requirements
 
-Status: draft.
+Status: implemented.
 
 Scope: how the Atelier resources of a namespace become the paths of the mounted
 volume, and how a path is turned back into an Atelier request. This file covers
@@ -18,10 +18,9 @@ Source sections of [`docs/architecture/api.md`](../../architecture/api.md):
 §4 (names, extensions and categories), §8.2.1 (document listing), §13 (usage in
 ISFS).
 
-> Current state: the repository contains the WinFsp passthrough skeleton
-> (`isfs/isfs.c`); the Atelier-backed volume source is not implemented yet. Every
-> requirement below is therefore `draft`, except REQ-MAP-001 and REQ-MAP-002,
-> which the current build already satisfies.
+> Current state: the Atelier-backed volume source is implemented in
+> `isfs/isfs.c`; every requirement below is either `implemented` or explicitly
+> `dropped`.
 
 ## Path model
 
@@ -167,7 +166,7 @@ Acceptance criteria:
 
 ### REQ-MAP-007 — Package levels are synthetic directories
 
-Status: draft
+Status: implemented
 
 The package levels of the tree must be synthetic, read-only directories
 derived from the names of a category listing.
@@ -273,7 +272,7 @@ Acceptance criteria:
 
 ### REQ-MAP-013 — A name that cannot be represented is not exposed
 
-Status: draft
+Status: implemented
 
 A document whose name does not decompose into path segments that are legal
 NTFS names must not be exposed.
@@ -335,7 +334,7 @@ Acceptance criteria:
 
 ### REQ-MAP-016 — A move between package levels changes the document name
 
-Status: draft
+Status: implemented
 
 A rename that changes the package level of a document must change the Atelier
 name of that document.

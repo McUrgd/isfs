@@ -1,6 +1,6 @@
 # Mount / attach lifecycle — requirements
 
-Status: draft.
+Status: implemented.
 
 Scope: attaching the ISFS volume to Windows, its identity and initial state, the mount-time
 checks against the Atelier server, and detaching it again. Content semantics (paths, files,
@@ -59,7 +59,7 @@ Acceptance criteria:
 
 ### REQ-MOUNT-003 — Supported mount point form
 
-Status: approved
+Status: implemented
 
 The mount point must be a drive letter (`X:`) ; mounting onto a directory path is not supported.
 
@@ -288,7 +288,7 @@ naming, access control, and gateway concerns with no v1 consumer.
 
 ### REQ-MOUNT-029 — The mounted volume is usable
 
-Status: approved
+Status: implemented
 
 Once the mount has succeeded, the volume must be openable and browsable through normal
 Windows file access. What the volume contains and how names resolve is defined elsewhere
@@ -300,10 +300,12 @@ Acceptance criteria:
 - A volume whose root cannot be opened is treated as a failed mount: it is not left
   mounted and the process exits with a non-zero status and a log message (REQ-MOUNT-021).
 
-> Note: this requirement is what REQ-MOUNT-001 deliberately does not cover. The current
-> build satisfies only the process model of REQ-MOUNT-001: the volume source is the Atelier
-> mapping, which is not implemented yet, so the acceptance criteria above are verified
-> together with `atelier-mapping.md` and `filesystem-operations.md`.
+> Note: this requirement is what REQ-MOUNT-001 deliberately does not cover. The volume
+> source is the Atelier mapping, so the acceptance criteria above are verified together
+> with `atelier-mapping.md` and `filesystem-operations.md`; the manual checks in
+> `scripts/delete-test.ps1`, `scripts/rename-test.ps1` and `scripts/unmount-test.ps1`
+> mount the volume against the mock server and open, browse and modify documents
+> through it.
 
 ## Open decisions affecting this area
 

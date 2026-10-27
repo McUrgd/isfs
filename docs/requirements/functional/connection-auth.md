@@ -1,6 +1,6 @@
 # Connection and authentication — requirements
 
-Status: draft.
+Status: implemented.
 
 Scope: how ISFS reaches the Atelier server and how it authenticates there — the
 scheme and the endpoint URL, the HTTP transport, the presentation of the
@@ -102,18 +102,21 @@ Acceptance criteria:
   `http://<host:port>/api/atelier/v1/%25SYS`.
 - No other character of the namespace value is altered.
 
-### REQ-CONN-005 — Requests are bounded by a timeout
+### REQ-CONN-005 — Configurable timeouts — dropped
 
-Status: draft
+Status: dropped
 
-Every request must be bounded by configurable connect, send, receive and
-resolve timeouts, each defaulting to 30 seconds.
+Separate configurable connect, send, receive and resolve timeouts are
+intentionally unsupported in v1: every request is bounded by one fixed
+30-second value.
 
-Acceptance criteria:
-- A server that accepts the connection but never answers makes the request
-  fail with `STATUS_IO_TIMEOUT` after the configured timeout.
-- The timeout used by the mount probe is 30 seconds by default.
-- The timeout applies to the whole request, not only to the first byte.
+Rationale: the mount has no configuration surface beyond the command line
+(REQ-CONN-018) and no v1 consumer needs a per-mount timeout; the fixed value is
+enough to fail a hanging request with `STATUS_IO_TIMEOUT`.
+
+> Implemented as one fixed value: `WinHttpSetTimeouts` is called once when the
+> client session is opened (`isfs/atelier.c`), so the limit covers the whole
+> request, not only the first byte.
 
 ### REQ-CONN-006 — Every request carries HTTP Basic credentials
 
@@ -351,19 +354,21 @@ Acceptance criteria:
   client re-establishes the connection.
 - The re-establishment is not visible to the caller: the operation succeeds.
 
-### REQ-CONN-023 — The startup log names the endpoint and the scheme
+### REQ-CONN-023 — The startup log names the authentication scheme — dropped
 
-Status: draft
+Status: dropped
 
-The effective connection configuration must be reported at startup, naming the
-endpoint URL, the scheme and the authentication scheme, but never the
-credential.
+Reporting the authentication scheme and the canonical form of the namespace in
+the startup log is intentionally unsupported in v1.
 
-Acceptance criteria:
-- The startup log contains the base URL and the words `http` and `Basic`.
-- The startup log contains neither the login nor the password.
-- The namespace of the `-ns` value is reported in its canonical (server)
-  form.
+Rationale: the startup log already names the base URL, which carries the host,
+the port, the API path, the `-ns` namespace and the `http` scheme; the
+authentication scheme is a fixed constant (REQ-CONN-006) and the namespace is
+not canonicalized before the log line is written, so a separate record would
+restate values that cannot be configured.
+
+> Implemented part: the startup log contains the base URL, the namespace and the
+> conflict policy, and never the login or the password (REQ-CONN-010).
 
 ### REQ-CONN-024 — Transport failures map to a fixed set of NTSTATUS values
 
@@ -424,10 +429,8 @@ Resolved: the configuration surface is the command line only
 Resolved: namespace rights are decided by the server, ISFS keeps no list of
 them (REQ-CONN-017).
 
-Open: the connect, send and receive timeouts are currently a single value of
-30 seconds. Whether they are split into separate settings and whether they
-are configurable per mount is to be decided with the configuration surface of
-`mount-lifecycle.md`.
+Resolved: the connect, send and receive timeouts are a single fixed value of
+30 seconds and are not configurable in v1 (REQ-CONN-005 is dropped).
 
 ## Related documents
 

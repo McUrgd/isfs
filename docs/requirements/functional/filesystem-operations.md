@@ -1,6 +1,6 @@
 # Filesystem operations — requirements
 
-Status: draft.
+Status: implemented.
 
 Scope: what the mounted volume does when Windows reads, writes, creates, deletes,
 renames or enumerates. This file covers the behaviour of the file system callbacks
@@ -19,11 +19,9 @@ Source sections of [`docs/architecture/api.md`](../../architecture/api.md):
 §5 (content encoding), §6 (hashing, ETags and conflicts), §8.2 (listing),
 §8.3 (documents), §12 (implementation notes and discrepancies).
 
-> Current state: the repository contains the WinFsp passthrough skeleton
-> (`isfs/isfs.c`); the Atelier-backed volume source is not implemented yet.
-> Every requirement below is therefore `draft`, except REQ-FS-001, REQ-FS-003
-> and REQ-FS-004, which the current build already satisfies, and the requirements
-> marked `dropped`.
+> Current state: the Atelier-backed volume source is implemented in
+> `isfs/isfs.c`; every requirement below is either `implemented` or explicitly
+> `dropped`.
 
 ## Operation → endpoint map
 
@@ -290,7 +288,7 @@ ISFS does not perform conditional reads: it keeps no shared content cache, so a
 
 ### REQ-FS-018 — Creating a document issues no request
 
-Status: draft
+Status: implemented
 
 Creating a file must not send anything to the server: the document exists on the
 server only after a successful flush.
@@ -481,7 +479,7 @@ Acceptance criteria:
 
 ### REQ-FS-031 — A locked document cannot be deleted
 
-Status: draft
+Status: implemented
 
 A document that is locked on the server must not be deleted, and the caller must
 be told that the document is locked.
@@ -494,7 +492,7 @@ Acceptance criteria:
 
 ### REQ-FS-032 — A rename is a read, a write and a delete
 
-Status: draft
+Status: implemented
 
 The API has no rename. A rename must therefore be composed of the three calls
 that reproduce it.
@@ -509,7 +507,7 @@ Acceptance criteria:
 
 ### REQ-FS-033 — A rename is not atomic
 
-Status: draft
+Status: implemented
 
 A rename must be documented as a sequence of three calls that can fail in the
 middle, and the state it leaves behind must be visible to the caller.
@@ -523,7 +521,7 @@ Acceptance criteria:
 
 ### REQ-FS-034 — A rename follows the replacement rule of Windows
 
-Status: draft
+Status: implemented
 
 A rename onto an existing name must obey the replacement rule that the caller
 selected.
@@ -536,7 +534,7 @@ Acceptance criteria:
 
 ### REQ-FS-035 — A rename may change the category of a document
 
-Status: draft
+Status: implemented
 
 A rename may move a document into another category of the mounted namespace, and
 it may not move it into another namespace.
@@ -549,7 +547,7 @@ Acceptance criteria:
 
 ### REQ-FS-036 — A directory cannot be renamed
 
-Status: draft
+Status: implemented
 
 The directories of the volume are synthetic. They cannot be renamed, moved or
 deleted.
@@ -562,7 +560,7 @@ Acceptance criteria:
 
 ### REQ-FS-037 — A directory cannot be created or deleted
 
-Status: draft
+Status: implemented
 
 The directories of the volume are synthetic and read-only. They cannot be created
 or deleted.
@@ -658,10 +656,9 @@ From overview §12, to be resolved and folded into the requirements above:
 - compile on save — dropped for v1, with a contradiction in the overview to
   resolve (REQ-FS-044).
 
-Open: the exact status that a refused directory operation reports
-(REQ-FS-036, REQ-FS-037) — `STATUS_NOT_SUPPORTED` or an access denied status.
-The requirement above uses `STATUS_NOT_SUPPORTED`, because the operation is not
-part of the file system model rather than forbidden by the server.
+Resolved: a refused directory operation reports `STATUS_NOT_SUPPORTED`
+(REQ-FS-036, REQ-FS-037), because the operation is not part of the file system
+model rather than forbidden by the server.
 
 Resolved: a create reports the new file as present, with the content of its
 local buffer, before the first flush (REQ-MAP-014).
