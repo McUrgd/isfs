@@ -106,6 +106,7 @@ typedef struct
     BOOLEAN Enc; /* the document is binary (api.md §5) */
     BOOLEAN Dirty; /* the buffer differs from the server content (REQ-FS-020) */
     BOOLEAN Created; /* the document is new and was never sent to the server (REQ-FS-019) */
+    BOOLEAN DeleteOnClose; /* the caller asked for the document to be deleted (REQ-FS-030) */
     UINT64 Timestamp; /* the newest document timestamp below the directory, or the document ts */
 } PTFS_FILE_CONTEXT;
 
@@ -2462,11 +2463,34 @@ static VOID Cleanup(FSP_FILE_SYSTEM* FileSystem,
     PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
 
-    /* synthetic directories and documents have no local handle and cannot be
-     * deleted (REQ-MAP-001, REQ-FS-037)
+    /* synthetic directories have no local handle and cannot be deleted
+     * (REQ-MAP-001, REQ-FS-037)
      */
-    if (Context->IsSynthetic || Context->IsDocument)
+    if (Context->IsSynthetic)
         return;
+
+    /* the delete of a document is the DELETE of its Atelier name (REQ-FS-030);
+     * WinFsp reports the delete-on-close of the handle here, because the
+     * document has no local handle that could carry the disposition
+     */
+    if (Context->IsDocument)
+    {
+        if (0 != (Flags & FspCleanupDelete) || Context->DeleteOnClose)
+        {
+            PTFS* Ptfs = (PTFS*)FileSystem->UserContext;
+
+            if (NT_SUCCESS(DeleteDocument(Ptfs, Context->DocumentName)))
+                InvalidateCategoryCache(Ptfs, Context->Category);
+
+            /* the caller asked for the document to disappear: the buffer is not
+             * written, so the close does not recreate the document (REQ-FS-030)
+             */
+            Context->Dirty = FALSE;
+            Context->Created = FALSE;
+        }
+
+        return;
+    }
 
     if (Flags & FspCleanupDelete)
     {
@@ -2485,9 +2509,11 @@ static VOID Close(FSP_FILE_SYSTEM* FileSystem,
     HANDLE Handle = HandleFromContext(FileContext);
 
     /* when the save of the flush failed, the close makes one final attempt;
-     * data that is still not acknowledged is discarded (REQ-FS-029)
+     * data that is still not acknowledged is discarded (REQ-FS-029). A
+     * document that is being deleted is not saved: the delete wins (REQ-FS-030)
      */
-    if (FileContext->IsDocument && (FileContext->Dirty || FileContext->Created))
+    if (FileContext->IsDocument && (FileContext->Dirty || FileContext->Created) &&
+        !FileContext->DeleteOnClose)
     {
         FSP_FSCTL_FILE_INFO FileInfo;
 
@@ -2687,10 +2713,19 @@ NTSTATUS Flush(FSP_FILE_SYSTEM* FileSystem,
 
     /* a document is saved from its buffer, and only when something was
      * written (REQ-FS-028); a created file is sent even when it stayed empty
-     * (REQ-FS-019)
+     * (REQ-FS-019). A document that the caller has marked for deletion is not
+     * written: the delete wins and the buffer is dropped (REQ-FS-030).
      */
     if (Context->IsDocument)
     {
+        if (Context->DeleteOnClose)
+        {
+            if (0 == FileInfo)
+                return STATUS_SUCCESS;
+
+            return GetDocumentInfo(Ptfs, Context, FileInfo);
+        }
+
         EnterCriticalSection(&Context->Lock);
         Result = SaveDocument(Ptfs, Context, FileInfo);
         LeaveCriticalSection(&Context->Lock);
@@ -3241,8 +3276,25 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM* FileSystem,
 static NTSTATUS SetDelete(FSP_FILE_SYSTEM* FileSystem,
     PVOID FileContext, PWSTR FileName, BOOLEAN DeleteFile)
 {
+    PTFS_FILE_CONTEXT* Context = FileContext;
     HANDLE Handle = HandleFromContext(FileContext);
     FILE_DISPOSITION_INFO DispositionInfo;
+
+    /* the directories of the volume are synthetic: they cannot be deleted
+     * (REQ-FS-037)
+     */
+    if (Context->IsSynthetic)
+        return STATUS_NOT_SUPPORTED;
+
+    /* a document has no local handle that could carry the disposition, so the
+     * intent is recorded and acted upon when the handle is cleaned up: the
+     * DELETE of the Atelier name is issued there (REQ-FS-030)
+     */
+    if (Context->IsDocument)
+    {
+        Context->DeleteOnClose = DeleteFile;
+        return STATUS_SUCCESS;
+    }
 
     DispositionInfo.DeleteFile = DeleteFile;
 

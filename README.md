@@ -99,6 +99,25 @@ port; the work directory (`%TEMP%\isfs-rename-test` by default) keeps the reques
 mock, the service log and the debug log of isfs. The script exits with 0 only when every check
 passed.
 
+=== Manual check: deleting documents ===
+
+`scripts\delete-test.ps1` is a reproducible manual check of REQ-FS-030. It mounts
+`isfs\isfs.exe` on a free drive letter against the mock on a free loopback port, fills the
+descriptor cache of a category, deletes a document with `[IO.File]::Delete`, opens a document
+with `FileOptions.DeleteOnClose` and writes into it, and tries to delete a synthetic
+directory. The script verifies that the delete is a `DELETE` of the Atelier name, that the
+entry leaves the cache (the listing is reloaded and no longer holds the name), that the dirty
+buffer of a delete-on-close handle is not written, and that a directory is refused without a
+request:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\delete-test.ps1
+```
+
+Rebuild `isfs\isfs.exe` first. `-Drive` and `-Port` override the free drive letter and the
+port; the work directory (`%TEMP%\isfs-delete-test` by default) keeps the logs. The script
+exits with 0 only when every check passed.
+
 === Third-party ===
 
 - `cjson/` - [cJSON](https://github.com/DaveGamble/cJSON) v1.7.19, MIT license

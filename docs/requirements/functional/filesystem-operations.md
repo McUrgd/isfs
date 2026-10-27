@@ -468,7 +468,7 @@ Acceptance criteria:
 
 ### REQ-FS-030 — Deleting a document is a delete of that document
 
-Status: draft
+Status: implemented
 
 Deleting a file must remove the document with the same name on the server.
 

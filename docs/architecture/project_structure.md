@@ -20,6 +20,7 @@ The `scripts/` folder contains tools for development and manual verification:
 
 - **`mock-atelier.ps1`**: A mock server that simulates the Atelier API endpoints. It allows testing the file system without a live backend and logs all incoming requests for verification.
 - **`rename-test.ps1`**: A comprehensive manual test suite for document renaming (REQ-MAP-016, REQ-FS-032..036).
+- **`delete-test.ps1`**: A manual check for the delete of a document, including delete-on-close (REQ-FS-030).
 - **`unmount-test.ps1`**: A manual check for the unmount behavior and data discarding (REQ-MOUNT-023).
 
 ## Documentation (`docs/`)
