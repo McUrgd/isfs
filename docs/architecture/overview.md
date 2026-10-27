@@ -8,10 +8,10 @@ This document maps the InterSystems Atelier v1 API base path `/api/atelier/v1` o
 
 ## 1. Purpose and scope
 
-ISFS mounts a remote InterSystems IRIS/Caché server as a Windows drive. The drive is a
-**view** over the server: it does not mirror the server to disk, and there is no local
-working copy. The server remains the source of truth for content, timestamps and document
-existence.
+ISFS mounts a remote InterSystems IRIS/Caché server as a Windows drive through the Atelier
+v1 REST API that the server already serves. The drive is a **view** over the server: it does
+not mirror the server to disk, and there is no local working copy. The server remains the
+source of truth for content, timestamps and document existence.
 
 In scope:
 

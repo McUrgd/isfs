@@ -1,10 +1,13 @@
-# ISFS — InterSystems Atelier as a Windows drive
+# ISFS — InterSystems Atelier API as a Windows drive
 
 [![build-and-test](https://github.com/McUrgd/isfs/actions/workflows/build.yml/badge.svg)](https://github.com/McUrgd/isfs/actions/workflows/build.yml)
 
-ISFS mounts an InterSystems IRIS/Caché namespace as a Windows drive letter and exposes its
-documents (`CLS`, `CSP`, `RTN`, `OTH`) as ordinary files, so Explorer, VS Code and the
-command line work against the server without Studio. The drive is a **view** over the
+ISFS mounts an InterSystems IRIS/Caché namespace as a Windows drive letter through the
+**Atelier v1 REST API** (`/api/atelier/v1`), which every Caché and IRIS installation serves,
+and exposes the documents of the namespace (`CLS`, `CSP`, `RTN`, `OTH`) as ordinary files,
+so Explorer, VS Code and the command line work against the server without Studio. Atelier
+here is the API, not the Eclipse-based IDE of the same name: the drive needs nothing but the
+web gateway and the API that the server already provides. The drive is a **view** over the
 server: there is no local copy, and the server stays the source of truth for content,
 timestamps and document existence.
 

@@ -1,7 +1,9 @@
 # AGENTS.md
 
 ## Проект
-This project connects Atelier v1 API by Intersystems as Windows filesystem.
+This project exposes the InterSystems Atelier v1 REST API (the `/api/atelier/v1` API that
+any Caché/IRIS installation serves, not the Eclipse-based Atelier IDE) as a Windows
+filesystem.
 
 ## Карта документации
 - Требования: `docs/requirements/README.md` (индекс) и `docs/requirements/functional/`
