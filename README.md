@@ -1,19 +1,28 @@
 === ISFS AS Windows FileSystem ===
 
-This project is based on the passthrough file system example from WinFsp (Copyright © Bill Zissimopoulos). 
-It is licensed under the GNU General Public License v3 with the FLOSS Exception.
-https://github.com/winfsp/winfsp/
+This project is based on the passthrough file system example from WinFsp.
+It is licensed under the GNU General Public License version 3 with the
+WinFsp FLOSS Exception.
+
+    WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
+    https://github.com/winfsp/winfsp/
+
+The full text of the GPLv3 is in `LICENSE.txt`; the FLOSS Exception and the
+third-party notices are in `NOTICE`.
 
 This project connects Atelier v1 API by Intersystems as Windows filesystem.
 
 === Building ===
 
-Requirements: Visual Studio 2022/2026 C++ tools (x64) and WinFsp installed (runtime DLL is needed at run time).
+Requirements: Visual Studio 2022/2026 C++ tools (x64) and WinFsp installed
+(runtime DLL is needed at run time and the import library at build time).
 
-WinFsp SDK parts used by the build are vendored in the repository:
+WinFsp SDK parts used by the build:
 
-- `passthrough/winfsp/` - headers (`winfsp.h`, `fsctl.h`, `launch.h`)
-- `passthrough/lib/winfsp-x64.lib` - import library
+- `passthrough/winfsp/` - headers (`winfsp.h`, `fsctl.h`, `launch.h`), vendored
+- `passthrough/lib/winfsp-x64.lib` - import library, copied from the installed
+  WinFsp SDK by `scripts\copy-winfsp-lib.ps1` (not stored in the repository;
+  it is a WinFsp build artifact, see `NOTICE`)
 
 The VS Code build task (`.vscode/tasks.json`, Ctrl+Shift+B) compiles and links with these local files, so no external SDK include path is required:
 
@@ -120,6 +129,12 @@ exits with 0 only when every check passed.
 
 === Third-party ===
 
+The complete list of third-party components and licenses is in `NOTICE`.
+
+- `winfsp/` (headers) and `passthrough/` - WinFsp, Copyright (C) Bill Zissimopoulos,
+  https://github.com/winfsp/winfsp/, GPLv3 with the WinFsp FLOSS Exception
+  (`passthrough/License.txt`, exception text also in `NOTICE`). `isfs/` is derived
+  from the passthrough example and is therefore distributed under the same terms.
 - `cjson/` - [cJSON](https://github.com/DaveGamble/cJSON) v1.7.19, MIT license
   (see `cjson/LICENSE`). It parses the UTF-8 JSON answers of the Atelier API;
   the strings of the server are converted to UTF-16 by `Utf8ToWide()` in `isfs/isfs.c`.
@@ -133,10 +148,14 @@ and does not add that directory to `PATH`, so the loader cannot find it (error 0
 
 The VS Code build task solves this by copying the DLL next to the executable
 (`isfs\winfsp-x64.dll`), so no `PATH` changes are needed. The file is listed in `.gitignore`.
+The import library `passthrough\lib\winfsp-x64.lib` is obtained the same way: it is a
+WinFsp build artifact and is not stored in the repository.
 
-The copy is done by `scripts\copy-winfsp-dll.ps1`, which searches for the WinFsp installation
-(registry `HKLM\SOFTWARE\WOW6432Node\WinFsp`, then the `Program Files (x86)\WinFsp` fallback).
-It is called by the `winfsp: copy runtime dll` task via `powershell.exe -File`, i.e. without an
+Both copies are done by scripts that search for the WinFsp installation (registry
+`HKLM\SOFTWARE\WOW6432Node\WinFsp`, then the `Program Files (x86)\WinFsp` fallback):
+`scripts\copy-winfsp-dll.ps1` for the runtime DLL and `scripts\copy-winfsp-lib.ps1`
+for the import library. They are called by the `winfsp: copy runtime dll` and
+`winfsp: copy import library` tasks via `powershell.exe -File`, i.e. without an
 intermediate shell, so that no nested quoting is involved.
 
 Alternatives:
@@ -146,3 +165,12 @@ Alternatives:
 
 The WinFsp driver itself must be installed on the machine (it is already registered as a service,
 which is required for mounting a drive).
+
+=== License ===
+
+ISFS is free software: GNU General Public License v3 with the WinFsp FLOSS Exception.
+`LICENSE.txt` holds the GPLv3 text, `NOTICE` the exception and the third-party notices.
+The exception forbids mixing a WinFsp-based program with proprietary software, and the
+parts derived from the passthrough example (GPLv3) cannot be relicensed; a closed-source
+distribution needs a commercial WinFsp license and a rewrite of the derived code.
+

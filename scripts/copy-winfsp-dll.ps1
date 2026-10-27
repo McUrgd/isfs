@@ -17,10 +17,17 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $DestinationDir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'isfs')
+    [string] $DestinationDir
 )
 
 $ErrorActionPreference = 'Stop'
+
+# The default is resolved here, not in the param() block: default values are
+# evaluated in the caller's scope, where $PSScriptRoot is not set yet.
+$root = Split-Path -Parent $PSScriptRoot
+if (-not $DestinationDir) {
+    $DestinationDir = Join-Path $root 'isfs'
+}
 
 # Possible locations of the WinFsp installation (x86 registry view first, then x64).
 $installDirs = @(

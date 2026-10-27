@@ -24,6 +24,28 @@
             }
         },
         {
+            "label": "winfsp: copy import library",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\copy-winfsp-lib.ps1",
+                "-DestinationDir",
+                "${workspaceFolder}\\passthrough\\lib"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            }
+        },
+        {
             "label": "isfs: prepare warning build",
             "type": "process",
             "command": "powershell.exe",
@@ -98,7 +120,8 @@
                 "cwd": "${fileDirname}"
             },
             "dependsOn": [
-                "winfsp: copy runtime dll"
+                "winfsp: copy runtime dll",
+                "winfsp: copy import library"
             ],
             "problemMatcher": [
                 "$msCompile"
@@ -144,7 +167,8 @@
             },
             "dependsOn": [
                 "isfs: prepare warning build",
-                "winfsp: copy runtime dll (w4)"
+                "winfsp: copy runtime dll (w4)",
+                "winfsp: copy import library"
             ],
             "dependsOrder": "sequence",
             "problemMatcher": [
@@ -189,7 +213,8 @@
                 "cwd": "${workspaceFolder}"
             },
             "dependsOn": [
-                "isfs: prepare warning build"
+                "isfs: prepare warning build",
+                "winfsp: copy import library"
             ],
             "problemMatcher": [
                 "$msCompile"

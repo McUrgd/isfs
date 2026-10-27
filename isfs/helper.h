@@ -6,17 +6,17 @@
 /*
  * This file is part of ISFS.
  *
- * You can redistribute it and/or modify it under the terms of the GNU
- * General Public License version 3 as published by the Free Software
- * Foundation.
+ * ISFS is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License version 3 as published by the Free
+ * Software Foundation, with the WinFsp FLOSS Exception (see NOTICE).
  *
- * Licensees holding a valid commercial license may use this software
- * in accordance with the commercial license agreement provided in
- * conjunction with the software.  The terms and conditions of any such
- * commercial license agreement shall govern, supersede, and render
- * ineffective any application of the GPLv3 license to this software,
- * notwithstanding of any reference thereto in the software or
- * associated repository.
+ * ISFS is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with ISFS.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef ISFS_HELPER_H

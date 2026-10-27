@@ -19,6 +19,11 @@
   * notwithstanding of any reference thereto in the software or
   * associated repository.
   */
+/*
+ * ISFS-specific changes are Copyright (C) 2026 Pavlov Sergey and are
+ * distributed under the same terms (GPLv3 with the WinFsp FLOSS Exception;
+ * see NOTICE and LICENSE.txt).
+ */
 
 #include <winfsp/winfsp.h>
 #include <strsafe.h>
@@ -3781,6 +3786,10 @@ static NTSTATUS SvcStart(FSP_SERVICE* Service, ULONG argc, PWSTR* argv)
 
     MountPoint = FspFileSystemMountPoint(Ptfs->FileSystem);
 
+    /* WinFsp FLOSS Exception: the notice must be shown in the user interface */
+    info(L"WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos");
+    info(L"https://github.com/winfsp/winfsp/");
+
     info(L"%s -p %s -ns %s -m %s",
         L"" PROGNAME,
         BaseUrlBuf,
@@ -3818,7 +3827,12 @@ usage:
             "    -user Login         [Atelier login]\n"
             "    -pass Password      [Atelier password; kept in memory only]\n"
             "    -overwrite          [replace the server version on a conflict; off by default]\n"
-            "    -m DriveLetter      [X: only; mounting on a directory is not supported]\n";
+            "    -m DriveLetter      [X: only; mounting on a directory is not supported]\n"
+            "\n"
+            "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos\n"
+            "https://github.com/winfsp/winfsp/\n"
+            "isfs is licensed under the GNU General Public License v3 with the WinFsp\n"
+            "FLOSS Exception; see LICENSE.txt and NOTICE.\n";
 
         fail(usage, L"" PROGNAME);
     }

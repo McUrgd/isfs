@@ -13,7 +13,7 @@ The core logic of the file system is implemented in the `isfs/` directory:
 - **`cjson/`**: Contains the `cJSON` library, used to parse JSON responses received from the Atelier API.
 
 ## Integration and Dependencies (`passthrough/`)
-- **`passthrough/`**: Contains the necessary headers and static libraries (`winfsp-x64.lib`) required to link the project with the WinFsp driver. It acts as the integration layer between the ISFS logic and the Windows File System Proxy.
+- **`passthrough/`**: Contains the vendored WinFsp user-mode headers and the `passthrough` example file system (GPLv3 with the WinFsp FLOSS Exception, see `NOTICE`). It acts as the integration layer between the ISFS logic and the Windows File System Proxy. The import library `passthrough/lib/winfsp-x64.lib` is not stored in the repository: it is copied from the installed WinFsp SDK by `scripts/copy-winfsp-lib.ps1`.
 
 ## Testing and Automation (`scripts/`)
 The `scripts/` folder contains tools for development and manual verification:
@@ -22,6 +22,7 @@ The `scripts/` folder contains tools for development and manual verification:
 - **`rename-test.ps1`**: A comprehensive manual test suite for document renaming (REQ-MAP-016, REQ-FS-032..036).
 - **`delete-test.ps1`**: A manual check for the delete of a document, including delete-on-close (REQ-FS-030).
 - **`unmount-test.ps1`**: A manual check for the unmount behavior and data discarding (REQ-MOUNT-023).
+- **`copy-winfsp-dll.ps1`**, **`copy-winfsp-lib.ps1`**: Copy `winfsp-x64.dll` and `winfsp-x64.lib` from the installed WinFsp SDK; neither binary is stored in the repository.
 
 ## Documentation (`docs/`)
 - **`requirements/`**: Contains functional and mapping requirements (e.g., `functional/filesystem-operations.md`, `functional/atelier-mapping.md`).
