@@ -1,12 +1,48 @@
-### VisualStudioCode ###
+# ---- Visual Studio Code ----
 .vscode/*
 !.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/c_cpp_properties.json
+
+# ---- Visual Studio ----
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+
+# ---- MSVC build artifacts ----
 *.exe
 *.obj
-*.pdb
-*.ilk
-*.exp
 *.lib
+*.exp
+*.ilk
+*.pdb
+*.idb
+*.iobj
+*.ipdb
+*.tlog
+*.lastbuildstate
+*.pch
+*.ipch
+*.aps
+*.res
+*.map
 *.nativecodeanalysis.xml
+
+# ---- build output ----
+/isfs/w4/
+/isfs/analyze/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+ARM64/
+
+# ---- WinFsp binaries: fetched from the installed SDK at build time (see NOTICE) ----
 winfsp-x64.dll
-debug.log
+
+# ---- logs ----
+*.log

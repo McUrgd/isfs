@@ -1,0 +1,19 @@
+# Normalize line endings: LF in the repository and LF in the working tree.
+# This keeps diffs identical regardless of the local core.autocrlf setting.
+* text=auto eol=lf
+
+# Windows scripts keep CRLF so they behave the same in Windows PowerShell 5.1.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Third-party / vendored code (excluded from GitHub language statistics).
+cjson/* linguist-vendored
+passthrough/winfsp/* linguist-vendored
+passthrough/passthrough.c linguist-vendored
+
+# Binaries are never diffed or converted.
+*.exe binary
+*.dll binary
+*.lib binary
+*.pdb binary
