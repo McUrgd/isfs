@@ -39,7 +39,8 @@ notices are in `NOTICE`.
 <!-- TODO: save a screenshot as docs/images/demo.png and replace the caption
      below with a Markdown image that points at it. -->
 
-_Explorer on `X:\CLS\User\` — the documents of the namespace as ordinary files._
+![root](docs/images/demo01.png)
+![dir](docs/images/demo02.png)
 
 ## What works
 
